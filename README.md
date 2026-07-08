@@ -10,23 +10,47 @@
 
 | 能力 | 命令行开关 | 说明 |
 | --- | --- | --- |
-| SQL 注入 | `--sqli` | 报错、布尔、inline、UNION、stacked、时间盲注 |
+| SQL 注入 | `--sqli` | 报错、布尔、inline、UNION、stacked、时间盲注, 支持 tamper  |
 | XSS | `--xss` | 反射/存储统一检测，支持 marker 回扫 |
 | 命令注入 / RCE | `--rce` | 命令回显、时间盲注、OOB 带外确认 |
-| LFI / 任意文件读取 | `--lfi` | 目录遍历、任意文件读取、PHP 源码读取 |
-| XXE | `--xxe` | OOB XXE、带内文件读取、XInclude、php://filter |
-| 指纹识别 | `--fp` | 框架、中间件、CMS、开源应用指纹 |
+| LFI / 任意文件读取 | `--lfi` | 目录遍历、任意文件读取、`php://filter` 源码读取 |
+| XXE | `--xxe` | 带内文件读取、OOB 外部实体解析 |
+| 指纹识别 | `--fp` | 框架、语言、中间件、CMS、开源应用、favicon hash |
 | 开放重定向 / CRLF | `--redir` | 开放重定向、响应头注入 |
-| 敏感信息泄漏 | `--sensitive` | JS、JSON、配置、响应内容中的敏感信息匹配 |
-| SSRF | `--ssrf` | interactsh OOB 带外 SSRF 验证 |
-| OSS / 对象存储 | `--oss` | 存储桶发现、列举、匿名写入、AK/SK 线索 |
+| 敏感信息泄漏 | `--sensitive` | AK/SK、API key、Token、私钥、配置文件、Swagger、Actuator 等 |
+| SSRF | `--ssrf` | 多协议和绕过变体，基于 OOB 回连确认 |
+| OSS / 对象存储 | `--oss` | 桶发现、匿名列举、匿名上传/覆盖、AK/SK 泄漏 |
 | SSTI | `--ssti` | 算术回显、字符串转换、模板错误指纹 |
-| 文件上传 | `--upload` | 上传落点确认、脚本/图片马/主动内容/.htaccess |
-| JWT | `--jwt` | JWT 暴露、弱密钥、签名绕过、claim 风险 |
+| 文件上传 | `--upload` | 上传点识别、危险扩展、双扩展、图片马、解析绕过、`.htaccess` 链 |
+| JWT | `--jwt` | `alg=none`、签名绕过、弱 HMAC 密钥、claim风险 |
 | 全量扫描 | `--full-payload-scan` | 使用更完整的 payload/tamper，并启用更多 Cookie/Header 检测
 | 校验证书 | `--verify-upstream-cert` | 校验目标站TLS证书，默认忽略自签名或无效证书
 
 不指定任何检测开关时，默认按 `config.yaml` 中启用的插件全部运行。指定一个或多个检测开关后，只运行被指定的插件。
+
+## 工作方式
+
+```text
+浏览器 / BurpSuite
+  -> pass_scan mitmproxy 127.0.0.1:8081
+  -> 目标站点
+
+目标响应
+  -> pass_scan 记录流量、入队检测、刷新报告
+  -> 浏览器 / BurpSuite
+```
+
+核心流程：
+
+```text
+run.py
+  -> 启动 mitmdump 并加载 pass_scan/mitm_addon.py
+  -> 写入 logs/flows.jsonl
+  -> PassiveScanner 构建 ScanContext
+  -> 插件 observe / interested / check
+  -> 写入 logs/vulns.jsonl、logs/fingerprints.jsonl
+  -> 生成 report.html
+```
 
 ## 环境要求
 
