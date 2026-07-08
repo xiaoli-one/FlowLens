@@ -1,6 +1,6 @@
-# pass_scan
+# FlowLens
 
-`pass_scan` 是一个基于 `mitmproxy/mitmdump` 的被动流量安全检测工具。它通过本地代理接收浏览器、BurpSuite 或其他客户端转发的 HTTP/HTTPS 流量，记录请求与响应，并将符合条件的流量提交给漏洞插件进行后台验证，最终输出 JSONL 结果和静态 HTML 报告。
+`FlowLens` 是一个基于 `mitmproxy/mitmdump` 的被动流量安全检测工具。它通过本地代理接收浏览器、BurpSuite 或其他客户端转发的 HTTP/HTTPS 流量，记录请求与响应，并将符合条件的流量提交给漏洞插件进行后台验证，最终输出 JSONL 结果和静态 HTML 报告。
 
 > 仅在已授权的资产和测试环境中使用。本工具会重放请求并注入 payload，部分插件会发起带外探测或写入 canary 文件。
 
