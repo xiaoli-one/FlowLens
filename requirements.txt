@@ -1,2 +1,17 @@
+# FlowLens runtime dependencies.
+
+# Proxy engine. run.py starts mitmdump and pass_scan/mitm_addon.py imports mitmproxy.http.
 mitmproxy>=10.0.0
+
+# YAML rule/config parsing for config.yaml and every plugin rules.yaml.
+PyYAML>=6.0.0
+
+# Response body charset detection fallback.
 charset-normalizer>=3.0.0
+
+# OOB interactsh client and JWT RSA/JWK/certificate checks.
+cryptography>=3.4
+
+# Favicon hash acceleration for fingerprint detection. The scanner has a pure-Python fallback,
+# but installing mmh3 keeps Shodan/FOFA-style favicon hashing fast.
+mmh3>=4.0.0
