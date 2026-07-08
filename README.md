@@ -28,30 +28,6 @@
 
 不指定任何检测开关时，默认按 `config.yaml` 中启用的插件全部运行。指定一个或多个检测开关后，只运行被指定的插件。
 
-## 工作方式
-
-```text
-浏览器 / BurpSuite
-  -> pass_scan mitmproxy 127.0.0.1:8081
-  -> 目标站点
-
-目标响应
-  -> pass_scan 记录流量、入队检测、刷新报告
-  -> 浏览器 / BurpSuite
-```
-
-核心流程：
-
-```text
-run.py
-  -> 启动 mitmdump 并加载 pass_scan/mitm_addon.py
-  -> 写入 logs/flows.jsonl
-  -> PassiveScanner 构建 ScanContext
-  -> 插件 observe / interested / check
-  -> 写入 logs/vulns.jsonl、logs/fingerprints.jsonl
-  -> 生成 report.html
-```
-
 ## 环境要求
 
 - Python 3.10+
