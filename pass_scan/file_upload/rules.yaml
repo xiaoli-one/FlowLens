@@ -1,0 +1,182 @@
+# File upload scanner rules.
+#
+# The scanner keeps payload bodies in Python because they need per-request
+# markers, but the broad matching vocabulary stays here.
+
+upload_name_keywords:
+  - upload
+  - file
+  - files
+  - filename
+  - filepath
+  - file_path
+  - filedata
+  - file_data
+  - filecontent
+  - content
+  - base64
+  - data
+  - blob
+  - avatar
+  - image
+  - img
+  - photo
+  - picture
+  - media
+  - attachment
+  - attach
+  - document
+  - doc
+  - import
+  - chunk
+  - resume
+  - logo
+  - icon
+  - cert
+  - license
+
+upload_path_keywords:
+  - /upload
+  - /uploads
+  - /file
+  - /files
+  - /avatar
+  - /image
+  - /images
+  - /photo
+  - /media
+  - /attachment
+  - /attachments
+  - /document
+  - /documents
+  - /import
+  - /chunk
+  - /asset
+  - /assets
+  - /profile
+
+success_keywords:
+  - success
+  - uploaded
+  - upload success
+  - upload successful
+  - file uploaded
+  - saved
+  - url
+  - path
+  - location
+  - download
+  - 上传成功
+  - 上传完成
+  - 保存成功
+
+failure_keywords:
+  - not allowed
+  - invalid extension
+  - invalid file
+  - unsupported file
+  - forbidden
+  - denied
+  - blocked
+  - failed
+  - failure
+  - upload error
+  - error occurred
+  - 不允许
+  - 非法
+  - 禁止
+  - 失败
+  - 错误
+
+script_extensions:
+  - php
+  - phtml
+  - php5
+  - jsp
+  - jspx
+  - asp
+  - aspx
+  - ashx
+
+script_bypass_filenames:
+  - "{stem}.php.jpg"
+  - "{stem}.jpg.php"
+  - "{stem}.pHp"
+  - "{stem}.php."
+  - "{stem}.phtml"
+  - "{stem}.asp;.jpg"
+  - "{stem}.aspx.jpg"
+  - "{stem}.jsp.jpg"
+
+active_content_extensions:
+  - html
+  - htm
+  - svg
+
+dangerous_extensions:
+  - php
+  - phtml
+  - php5
+  - jsp
+  - jspx
+  - asp
+  - aspx
+  - ashx
+  - html
+  - htm
+  - svg
+  - shtml
+  - cfm
+  - pl
+  - py
+  - rb
+  - cgi
+  - htaccess
+
+binary_media_prefixes:
+  - image/
+  - video/
+  - audio/
+  - application/vnd.
+
+binary_media_types:
+  - application/octet-stream
+  - application/pdf
+  - application/zip
+  - application/x-zip-compressed
+  - application/gzip
+  - application/x-tar
+  - application/x-rar-compressed
+  - application/msword
+  - application/vnd.openxmlformats-officedocument.wordprocessingml.document
+
+url_json_keys:
+  - url
+  - urls
+  - href
+  - src
+  - path
+  - file
+  - files
+  - filename
+  - fileName
+  - file_url
+  - fileUrl
+  - download
+  - downloadUrl
+  - download_url
+  - location
+  - key
+  - object
+  - objectKey
+
+common_upload_dirs:
+  - /uploads/
+  - /upload/
+  - /files/
+  - /file/
+  - /media/
+  - /assets/
+  - /static/uploads/
+  - /public/uploads/
+  
