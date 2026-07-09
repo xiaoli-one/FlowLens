@@ -49,7 +49,8 @@ def print_banner(args, enabled_label):
     print(
         green(
             f"[FlowLens] Plugins: {enabled_label} | "
-            f"Full payload scan: {'on' if args.full_payload_scan else 'config'}"
+            f"Full payload scan: {'on' if args.full_payload_scan else 'config'} | "
+            f"Verify: {'on' if args.verify else 'off'}"
         ),
         flush=True,
     )
@@ -162,6 +163,24 @@ def main():
         action="store_true",
         help="只做 JWT 漏洞检测",
     )
+    parser.add_argument(
+        "--logic",
+        dest="logic_agent",
+        action="store_true",
+        help="启用 Agent 逻辑漏洞检测（默认关闭）",
+    )
+    parser.add_argument(
+        "--only-logic",
+        dest="only_logic_agent",
+        action="store_true",
+        help="只启用 Agent 逻辑漏洞检测，不运行其他检测插件",
+    )
+    parser.add_argument(
+        "--verify",
+        dest="verify",
+        action="store_true",
+        help="启用 Agent 主动漏洞验证与非破坏性利用链生成（默认关闭）",
+    )
     args = parser.parse_args()
 
     addon_path = os.path.join(os.path.dirname(__file__), "pass_scan", "mitm_addon.py")
@@ -199,17 +218,26 @@ def main():
         selected_plugins.append("file_upload")
     if args.jwt:
         selected_plugins.append("jwt")
+    if args.only_logic_agent:
+        selected_plugins = ["logic_agent"]
 
     env = os.environ.copy()
     env["PASS_SCAN_LOG_FILE"] = args.log_file
     env["PASS_SCAN_REPORT_FILE"] = args.report_file
+    if args.logic_agent and not args.only_logic_agent:
+        env["PASS_SCAN_ENABLE_LOGIC"] = "1"
+    if args.verify:
+        env["PASS_SCAN_VERIFY"] = "1"
     if args.full_payload_scan:
         env["PASS_SCAN_FULL_PAYLOAD_SCAN"] = "1"
     if selected_plugins:
         env["PASS_SCAN_PLUGINS"] = ",".join(selected_plugins)
-        enabled_label = " + ".join(selected_plugins)
+        label_plugins = list(selected_plugins)
+        if args.logic_agent and not args.only_logic_agent:
+            label_plugins.append("logic_agent")
+        enabled_label = " + ".join(label_plugins)
     else:
-        enabled_label = "全部"
+        enabled_label = "全部 + logic_agent" if args.logic_agent else "全部"
 
     command = [
         find_mitmdump(),
@@ -241,6 +269,7 @@ def main():
             f"报告: {args.report_file} | "
             f"启用检测: {enabled_label} | "
             f"全量扫描: {'开启' if args.full_payload_scan else '按配置'} | "
+            f"主动验证: {'开启' if args.verify else '关闭'} | "
             "已发现漏洞: 0"
         ),
         flush=True,
