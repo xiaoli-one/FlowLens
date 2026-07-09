@@ -1,0 +1,198 @@
+# 指纹识别 —— 自定义覆盖规则。
+#
+# 主指纹库来自公开库（Wappalyzer + EHole + FingerprintHub 等），由 tools/import_rules.py 导入，
+# 生成在同目录的 rules.generated.yaml（自动加载，请勿手动编辑那个文件）。
+#
+# 这个文件用来放你自己的、公开库里没有的私有指纹规则。
+# rules.py 会把这里的规则和 rules.generated.yaml 一起加载。
+# 默认留空。
+#
+# 规则结构（和导入生成的格式一致）：
+#
+# fingerprints:
+#   - name: 你的内部系统
+#     category: 开源应用
+#     implies: [Java]          # 可选：识别出本指纹后自动带出的其它指纹
+#     matchers:                # 命中任意一条即算识别（OR 关系）
+#       - source: body         # header / cookie / body / url / title / favicon
+#         pattern: "MyApp"     # 正则（大小写不敏感）
+#       - source: header
+#         name: X-My-App       # source=header/cookie 时指定头名/cookie 名
+#         pattern: ".*"        # header 省略 pattern 表示“只要该头存在就命中”
+#       - source: url
+#         pattern: "/myapp/"   # 路径结构特征
+#       - source: favicon
+#         hash: -1234567890    # favicon 的 mmh3 hash（Shodan/FOFA 同款）
+#         version: "MyApp ([\\d.]+)"   # 可选：带捕获组的版本提取正则
+
+fingerprints:
+  # ============================================================
+  # 高价值渗透目标补充规则（公开库未覆盖或命名不同的部分）。
+  # 都用高置信度被动信号：特征路径 / 特有响应头 / 错误页关键字。
+  # 这些会和 rules.generated.yaml（Wappalyzer + EHole + FingerprintHub）一起加载。
+  # ============================================================
+
+  # --- Java 生态高危组件 ---
+  - name: Spring Boot Actuator
+    category: 框架
+    implies: [Spring Boot, Java]
+    matchers:
+      - source: body
+        all_of: ['"_links"', '"self"', '"href"']
+      - source: url
+        pattern: "/actuator(/|$)"
+      - source: body
+        all_of: ['"diskSpace"', '"status"']
+
+  - name: Swagger UI
+    category: API文档
+    matchers:
+      - source: body
+        pattern: "swagger-ui|Swagger UI|swagger-initializer\\.js"
+      - source: url
+        pattern: "/swagger-ui|/swagger-resources|/v2/api-docs|/v3/api-docs"
+
+  - name: Druid Monitor
+    category: 中间件
+    implies: [Java]
+    matchers:
+      - source: body
+        pattern: "druid-?monitor|DruidStatView|druid/index\\.html"
+      - source: url
+        pattern: "/druid/(index\\.html|sql\\.html|weburi\\.html)"
+
+  - name: Nacos
+    category: 开源应用
+    implies: [Java]
+    matchers:
+      - source: url
+        pattern: "/nacos(/|$)"
+      - source: body
+        all_of: ['nacos', 'console-ui']
+
+  - name: XXL-JOB
+    category: 开源应用
+    implies: [Java]
+    matchers:
+      - source: body
+        pattern: "xxl-job|分布式任务调度平台|xxl_job_login"
+
+  - name: Apache Dubbo
+    category: 中间件
+    implies: [Java]
+    matchers:
+      - source: body
+        pattern: "dubbo-admin|Dubbo Admin"
+
+  - name: Seata
+    category: 开源应用
+    implies: [Java]
+    matchers:
+      - source: body
+        all_of: ['seata']
+
+  # --- 注册/配置/编排中心 ---
+  - name: Consul
+    category: 开源应用
+    matchers:
+      - source: body
+        pattern: "consul-ui|/v1/agent/self"
+      - source: header
+        name: X-Consul-Index
+        pattern: ".*"
+
+  - name: etcd
+    category: 开源应用
+    matchers:
+      - source: header
+        name: X-Etcd-Cluster-Id
+        pattern: ".*"
+      - source: header
+        name: X-Etcd-Index
+        pattern: ".*"
+
+  - name: Docker Registry
+    category: 开源应用
+    matchers:
+      - source: header
+        name: Docker-Distribution-Api-Version
+        pattern: "registry/([\\d.]+)"
+        version: "registry/([\\d.]+)"
+
+  - name: Apache Flink
+    category: 开源应用
+    implies: [Java]
+    matchers:
+      - source: body
+        pattern: "Apache Flink Dashboard|flink-dashboard|/#/overview"
+
+  # --- 国产 OA / 办公系统（红队高频）---
+  - name: 泛微 OA
+    category: 开源应用
+    implies: [Java]
+    matchers:
+      - source: body
+        pattern: "weaver|/wui/|ecology|泛微"
+      - source: cookie
+        name: ecology_JSessionId
+
+  - name: 蓝凌 OA
+    category: 开源应用
+    implies: [Java]
+    matchers:
+      - source: body
+        pattern: "landray|/sys/ui/|蓝凌"
+
+  - name: 用友 NC/U8
+    category: 开源应用
+    implies: [Java]
+    matchers:
+      - source: body
+        pattern: "yonyou|用友|/nc/|NCFindWeb|yyoa"
+
+  - name: 金蝶 EAS
+    category: 开源应用
+    implies: [Java]
+    matchers:
+      - source: body
+        pattern: "kingdee|金蝶|/eas/|easportal"
+
+  # --- 主机面板 / 运维 ---
+  - name: 宝塔面板
+    category: 开源应用
+    matchers:
+      - source: body
+        pattern: "宝塔|bt_path|/static/login/|BT-Panel"
+      - source: cookie
+        name: BT_PANEL
+
+  - name: RuoYi
+    category: 开源应用
+    implies: [Java]
+    matchers:
+      - source: body
+        pattern: "若依|RuoYi|ruoyi"
+
+  # --- 中间件管理/数据组件控制台 ---
+  - name: Apache Solr
+    category: 开源应用
+    implies: [Java]
+    matchers:
+      - source: url
+        pattern: "/solr/(#/|admin)"
+      - source: body
+        pattern: "Solr Admin|solr-admin"
+
+  - name: Apache Zookeeper
+    category: 中间件
+    implies: [Java]
+    matchers:
+      - source: body
+        pattern: "ZooKeeper|zkServer"
+
+  # --- 容器编排 ---
+  - name: Kubernetes Dashboard
+    category: 开源应用
+    matchers:
+      - source: body
+        pattern: "kubernetes-dashboard|kd-error|Kubernetes Dashboard"
