@@ -2,7 +2,7 @@
 
 `FlowLens` 是一个基于 `mitmproxy/mitmdump` 的被动流量安全检测工具。它通过本地代理接收浏览器、BurpSuite 或其他客户端转发的 HTTP/HTTPS 流量，记录请求与响应，并把符合条件的流量提交给插件后台验证，最终输出 JSONL 结果和静态 HTML 报告。
 
-FlowLens 在被动传统被动检测基础上新加两个可选 Agent：
+`FlowLens` 在被动传统被动检测基础上新加两个可选 Agent：
 
 - **主动漏洞验证 Agent**：由 `vuln_verify` 提供，运行 `--verify` 后会把已发现漏洞交给 LLM 决策下一步非破坏性验证动作，再由本地受控 HTTP 执行器发包，生成可复现的利用链、payload 和成功请求证据。
 - **业务逻辑漏洞 Agent**：由 `agent_pass_scan` 提供，运行 `--logic` 或 `--only-logic` 后会持续索引被动流量，按认证指纹、接口、资源和历史响应建立上下文，对未授权、越权、租户隔离、流程绕过、敏感字段篡改等候选做差分验证，并交给 LLM 输出逻辑漏洞结论。
