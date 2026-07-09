@@ -1,0 +1,627 @@
+# pass_scan 全局配置。
+#
+# 这里控制调度层，不是某个漏洞的 payload。
+# SQL 注入 payload 在 pass_scan/sql_injection/rules.yaml。
+# 指纹规则在 pass_scan/fingerprint/rules.yaml + rules.generated.yaml。
+#
+# 启用哪些检测：
+#   python run.py                      默认同时做 SQL 注入 + XSS + 指纹识别 + 命令注入 + 目录遍历 + SSRF + XXE + SSTI + redir + 敏感信息泄漏 + OSS/对象存储桶 + 文件上传 + JWT
+#   python run.py --sqli               只做 SQL 注入
+#   python run.py --xss                只做 XSS
+#   python run.py --rce                只做命令注入
+#   python run.py --lfi                只做目录遍历/任意文件读取
+#   python run.py --ssrf               只做 SSRF
+#   python run.py --xxe                只做 XXE
+#   python run.py --ssti               只做 SSTI
+#   python run.py --redir              只做开放重定向/CRLF 响应头注入
+#   python run.py --sensitive          只做敏感信息泄漏检测
+#   python run.py --oss                只做 OSS/对象存储桶检测
+#   python run.py --upload             只做文件上传漏洞检测
+#   python run.py --jwt                只做 JWT 漏洞检测
+#   python run.py --fp                 只做指纹识别
+#   python run.py --sqli --rce         SQL 注入 + 命令注入
+# 命令行一旦指定检测参数，就只做指定的，覆盖下面的 enabled 开关。
+
+scan:
+  # passive: 只适合以后做纯被动规则
+  # light:   少量主动检测
+  # normal:  默认模式
+  # aggressive: 以后可以放更重的检测
+  mode: normal
+
+  # 每类漏洞队列默认 worker 数。不要太大，否则 Burp 联动时会明显变慢。
+  worker_count: 5
+
+  # 每类漏洞待扫描任务队列上限。满了就丢弃这一类漏洞的新任务，保护本机和目标站点。
+  queue_size: 200
+
+  # 同一个扫描点多久内不重复扫描，单位秒。
+  dedup_ttl_seconds: 1800
+
+  # 同一个 host 的主动任务间隔，单位秒。
+  per_host_interval_seconds: 0.2
+
+  # 单个请求最多取多少个参数交给插件，避免一个请求参数过多导致爆炸。
+  max_params_per_request: 8
+
+  # 终端状态输出间隔，单位秒。会按漏洞类型显示队列剩余、正在执行、已完成。
+  status_interval_seconds: 3
+
+  # 全量 payload 扫描开关。
+  # false：正常扫描。
+  # true：未确认漏洞前尽量跑更完整的 payload/tamper，速度会明显变慢。
+  #      同时会强制开启 Cookie/Header 注入检测，包括只有 Cookie/Header、没有 query/form/json 的请求。
+  # 注意：同一个参数一旦确认某类漏洞，例如 SQL 注入，就不会继续刷 SQL 注入 payload；
+  #      但后续 XSS、RCE、SSRF 等其他漏洞插件仍然可以继续检测。
+  full_payload_scan: false
+
+  # 确认当前 IP/会话被 WAF 封禁后，当前 host 暂停多久再继续，单位秒。
+  # 普通 payload 被 WAF 拦截不会等待，会继续尝试 tamper 绕过。
+  waf_backoff_seconds: 1800
+
+  # 同一个 host 连续确认被 WAF 封禁多少次后结束当前扫描任务。
+  waf_max_block_attempts: 3
+
+  # 浏览器/系统自己的后台流量，不记录、不扫描。
+  # 支持通配符，例如 clients*.google.com、*.telemetry.mozilla.org。
+  ignored_hosts:
+    # Firefox 后台服务。
+    - aus5.mozilla.org
+    - ads.mozilla.org
+    - push.services.mozilla.com
+    - firefox.settings.services.mozilla.com
+    - classify-client.services.mozilla.com
+    - contile.services.mozilla.com
+    - "*.services.mozilla.com"
+    - detectportal.firefox.com
+    - location.services.mozilla.com
+    - shavar.services.mozilla.com
+    - remote-settings.mozilla.org
+    - versioncheck.addons.mozilla.org
+    - crash-reports.mozilla.com
+    - telemetry.mozilla.org
+    - "*.telemetry.mozilla.org"
+    - cdn.mozilla.net
+    - "*.cdn.mozilla.net"
+    - mozilla-ohttp.fastly-edge.com
+    - mozilla.cloudflare-dns.com
+
+    # Chrome/Chromium 后台服务。
+    - clients*.google.com
+    - safebrowsing.googleapis.com
+    - update.googleapis.com
+    - variations.google.com
+    - optimizationguide-pa.googleapis.com
+    - redirector.gvt1.com
+    - edgedl.me.gvt1.com
+    - dl.google.com
+    - mtalk.google.com
+
+    # Edge / Windows 浏览器后台服务。
+    - edge.microsoft.com
+    - "*.edge.microsoft.com"
+    - msedge.api.cdp.microsoft.com
+    - iecvlist.microsoft.com
+    - nav-edge.smartscreen.microsoft.com
+    - browser.events.data.msn.com
+    - browser.pipe.aria.microsoft.com
+    - ntp.msn.com
+    - self.events.data.microsoft.com
+    - "*.events.data.microsoft.com"
+    - v10.events.data.microsoft.com
+
+    # Safari / Apple 后台服务。
+    - configuration.apple.com
+    - configuration.ls.apple.com
+    - gsp-ssl.ls.apple.com
+    - mesu.apple.com
+    - swscan.apple.com
+    - swcdn.apple.com
+    - xp.apple.com
+    - ocsp.apple.com
+    - ocsp2.apple.com
+    - valid.apple.com
+    - safebrowsing.apple.com
+    - api.smoot.apple.com
+
+    # Brave 后台服务。
+    - variations.brave.com
+    - componentupdater.brave.com
+    - go-updater.brave.com
+    - laptop-updates.brave.com
+    - safe-browsing.brave.com
+    - p3a.brave.com
+    - p3a-json.brave.com
+    - ads-serve.brave.com
+    - static.ads.brave.com
+    - grant.rewards.brave.com
+
+    # Opera 后台服务。
+    - autoupdate.opera.com
+    - autoupdate.geo.opera.com
+    - features.opera-api.com
+    - sitecheck2.opera.com
+    - speeddials.opera.com
+    - news.opera-api.com
+    - crashreports.operacdn.com
+
+    # Vivaldi 后台服务。
+    - update.vivaldi.com
+    - bifrost.vivaldi.com
+
+    # 系统网络探测/门户检测。
+    - captive.apple.com
+    - connectivitycheck.gstatic.com
+    - connectivitycheck.android.com
+    - www.msftconnecttest.com
+    - ipv6.msftconnecttest.com
+    - dns.msftncsi.com
+    - www.msftncsi.com
+
+report:
+  # 检测到漏洞后会生成/更新这个 HTML 文件。
+  html_file: report.html
+
+verification:
+  # 主动验证默认关闭。只有运行 python run.py --verify 时，才会调用 LLM 做漏洞验证和利用链生成。
+  enabled: false
+
+  # 验证 worker 与检测 worker 独立运行；检测和验证会并行。
+  worker_count: 3
+  queue_size: 100
+
+  # 验证结果 JSONL。report.html 会把它渲染到“验证”标签页。
+  output_file: logs/verifications.jsonl
+
+  # LLM 配置文件。默认兼容 OpenAI Chat Completions，可在 .env 里用 LLM_PROTOCOL
+  # 切换为 openai_responses / anthropic / gemini / ollama / azure_openai。
+  env_file: .env
+  llm_protocol: openai
+
+  # 单个漏洞的验证深度限制。agent 会主动发包，但执行器会阻断破坏性 SQL/命令/方法。
+  max_rounds: 10
+  max_requests_per_finding: 80
+  request_timeout_seconds: 12
+  llm_timeout_seconds: 60
+  llm_max_tokens: 4096
+  oob_wait_seconds: 30
+  max_response_body_bytes: 262144
+  observation_chars: 12000
+  prompt_chars: 50000
+  allowed_methods:
+    - GET
+    - POST
+    - HEAD
+    - PUT
+
+plugins:
+  sql_injection:
+    enabled: true
+
+    # 可选：覆盖 SQL 注入独立队列的 worker 数和队列上限。
+    # 不写时使用 scan.worker_count 和 scan.queue_size。
+    # worker_count: 3
+    # queue_size: 200
+
+    # 深度 tamper 检测：
+    # 普通 payload 没命中、也没有明显 WAF 拦截时，再尝试少量 tamper。
+    # 用来处理后端普通过滤、关键字删除、空格过滤、引号转义等情况。
+    deep_tamper: true
+
+    # 非 WAF 场景下，每个 payload 最多尝试多少个 tamper profile。
+    # WAF 场景仍然使用 rules.yaml 里的 max_tampered_payloads_per_probe。
+    deep_tamper_max_profiles: 4
+
+    # 哪些检测类型允许 deep tamper。
+    # deep_tamper 是“原始 payload 没命中、也没明显 WAF 拦截时再追发变形”，
+    # 相当于每个未命中 payload 额外乘上 deep_tamper_max_profiles 个请求。
+    # union_based 基础 payload 数量大，time_based/stacked_query 的 delay 包每个真耗 time_delay 秒，
+    # 这三类用 deep_tamper 代价高、收益低（它们主要靠语法闭合，不靠绕后端字符过滤），默认关闭。
+    # 仍需要时可手动加回；WAF 拦截触发的 tamper 重试不受此项影响，照常进行。
+    deep_tamper_methods:
+      - error_based
+      - boolean_based
+      - inline_query
+
+  # XSS 检测插件：不区分反射/存储/DOM，统一为一个漏洞类型 xss。
+  # 本质都是“注入的 payload 能否在某个可执行上下文里以标签形式存活”。
+  # 有可注入参数就主动注入检测；对每个 HTML 响应回扫已注入的 marker，
+  # 覆盖“在 A 页面提交、在 B 页面渲染”的场景。
+  xss:
+    enabled: true
+
+    # 可选：覆盖 XSS 独立队列的 worker 数和队列上限。
+    # 不写时使用 scan.worker_count 和 scan.queue_size。
+    # worker_count: 3
+    # queue_size: 200
+
+    # 回扫：对每个 HTML 响应回扫之前注入的 marker，发现跨页面渲染的 XSS。
+    # 关掉可减少开销，但会漏掉“提交后在别处渲染”的情况。
+    rescan: true
+
+  # 命令注入检测插件：检测 OS 命令注入。独立队列，先做流量筛选再主动检测。
+  # 三种检测方式合并为一种漏洞“命令执行”（报告里用证据的“检测方式”区分）：算术回显
+  # （把 $((A*B))/expr/set /a 拼进参数，响应出现乘积即命中，误报低）；时间盲注（sleep/ping/
+  # timeout 成对 + 二次确认，覆盖无回显盲打）；OOB 带外（对接免费 interactsh，注入 nslookup/curl
+  # 等命令，目标回连即确认，覆盖完全盲打，见下方 oob 段）。绕过用独立 tamper 阶段按需追加。
+  command_injection:
+    enabled: true
+
+    # 可选：覆盖命令注入独立队列的 worker 数和队列上限。
+    # 不写时使用 scan.worker_count 和 scan.queue_size。
+    # worker_count: 3
+    # queue_size: 200
+
+    # 时间盲注延时秒数与判定阈值（不写时用 rules.yaml 的 time_delay / time_threshold）。
+    time_delay: 5
+    time_threshold: 3
+
+    # 深度 tamper：原始 payload 没命中、也没明显 WAF 拦截时，再按 rules.yaml 的
+    # tamper_profiles 追发少量空格绕过变形（${IFS} / $IFS$9 / Tab / ${IFS%??}），
+    # 处理后端过滤空格的场景。基础 payload 保持干净，绕过按需触发，避免 payload 爆炸。
+    deep_tamper: true
+    deep_tamper_max_profiles: 4
+
+    # 默认对全部 query/form/json 参数做命令注入检测，不做参数筛选（覆盖最全）。
+    # full_payload_scan 开启时再额外纳入 Cookie/Header。
+
+    # 时间盲注策略：
+    #   always   —— 恒跑（默认，行为不变）。
+    #   fallback —— 只在 OOB 不可用时才跑；OOB 能用就靠带外覆盖盲打，省下每个 delay 包的数秒等待。
+    #   off      —— 关闭时间盲注。
+    time_based_mode: always
+
+    # OOB 带外检测：对接 projectdiscovery 免费公共 interactsh 服务，确认无回显盲打。
+    # 前提：目标能对外发起 DNS/HTTP 请求（内网无出网时 OOB 静默，由时间盲注兜底）。
+    oob:
+      enabled: true
+      # 不填 server 则自动在官方公共服务器间挑一个可用的（oast.pro / oast.fun …）。
+      # 也可指定自建服务器；自建带鉴权时用 token 填 Authorization。
+      # server: oast.pro
+      # token: ""
+      # 后台轮询回连的间隔（秒）。
+      poll_interval: 15
+
+  # 目录遍历 / 任意文件读取检测插件。独立队列，先做流量筛选再主动检测。
+  # 判定思路（低误报）：注入 ../../etc/passwd 这类 payload 去读系统敏感文件，只有目标
+  # 真的读到文件、响应里出现该文件的内容特征（/etc/passwd 的 root:x:0:0:、win.ini 的
+  # [fonts]），才判为漏洞；参数被反射只回显 payload 本身、不含特征，因此误报极低。
+  # 两种检测方式合并为一种漏洞“任意文件读取”（报告里用证据的“检测方式”区分）：文件内容
+  # 回显（读 /etc/passwd 或 win.ini）；PHP 源码读取（php://filter 把脚本 base64 后回显）。
+  # 主流绕过编码（%2f/%252f/....//、反斜杠、%00、file://）已直接并进基础 payload。
+  path_traversal:
+    enabled: true
+
+    # 可选：覆盖独立队列的 worker 数和队列上限。不写时用 scan.worker_count / scan.queue_size。
+    # worker_count: 3
+    # queue_size: 200
+
+    # 默认对全部 query/form/json 参数做目录遍历/文件读取检测，不做参数筛选（覆盖最全）。
+    # full_payload_scan 开启时再额外纳入 Cookie/Header。
+
+    # 深度 tamper：未编码 payload 没命中、也没明显 WAF 拦截时，再对它追发少量编码变形
+    # （%2f 单编码 / %252f 双编码 / %2e 点编码）兜底。主流绕过已在基础 payload 里，
+    # 这里只是补充，代价很小。
+    deep_tamper: true
+    deep_tamper_max_profiles: 3
+
+  # SSRF（服务端请求伪造）检测插件。独立队列。默认对全部 query/form/json 参数做检测，
+  # 不做参数筛选。只做带外（OOB）确认——最通用、覆盖面最广的一种：把参数替换成指向唯一子域的
+  # URL（多协议、无协议裸主机、协议相对、userinfo/路径/片段白名单绕过、子域名拼接击穿、
+  # 非 http 协议、大小写/URL 编码 scheme…绕过全部并进基础 payload），服务端一去请求
+  # （哪怕只 DNS 解析）就回连免费 interactsh，命中即高置信，天然覆盖盲打（见下方 oob）。
+  ssrf:
+    enabled: true
+
+    # 可选：覆盖 SSRF 独立队列的 worker 数和队列上限。不写时用 scan.worker_count / scan.queue_size。
+    # worker_count: 3
+    # queue_size: 200
+
+    # 默认对全部 query/form/json 参数做 SSRF 检测，不做参数筛选（覆盖最全）。
+    # full_payload_scan 开启时再额外纳入 Cookie/Header。
+
+    # 追发额外带外绕过变体（oob_templates_extra：路径/片段白名单绕过、子域名击穿、gopher/dict、
+    # 大小写/URL 编码 scheme）。默认开启，追求覆盖面；每个变体多占一个带外域名 + 一次请求。
+    deep_tamper: true
+
+    # OOB 带外检测：对接 projectdiscovery 免费公共 interactsh 服务，确认盲打 SSRF。
+    # 前提：目标能对外发起 DNS/HTTP 请求（内网无出网时带外静默，SSRF 无法被带外确认）。
+    oob:
+      enabled: true
+      # 不填 server 则自动在官方公共服务器间挑一个可用的（oast.pro / oast.fun …）。
+      # server: oast.pro
+      # token: ""
+      # 后台轮询回连的间隔（秒）。
+      poll_interval: 15
+
+  # XXE（XML 外部实体注入）检测插件。独立队列。先做流量筛选（请求里有没有 XML）再主动检测。
+  # 注入点是“被解析的 XML”：整个请求 body 是 XML，或某个参数值本身是一段完整 XML 文档。
+  # 两种确认通道合并为一种漏洞“XXE”（报告里用证据的“检测方式”区分）：带外解析（首选，最通用，
+  # 含盲打——外部实体/外部 DTD/参数实体指向唯一子域，解析器一去解析就回连免费 interactsh，命中
+  # 即高置信，见下方 oob）；带内文件读取（外部实体指向 file:///etc/passwd 等，响应出现文件
+  # signature 才判定，误报极低，兼顾无出网环境；另含 XInclude 与 php://filter 源码读取）。
+  # 外部实体的四种落点写法已并进基础 payload；WAF 绕过用独立 tamper（UTF-16/UTF-7 重编码等）按需追加。
+  xxe:
+    enabled: true
+
+    # 可选：覆盖 XXE 独立队列的 worker 数和队列上限。不写时用 scan.worker_count / scan.queue_size。
+    # worker_count: 3
+    # queue_size: 200
+
+    # 默认对“整个 XML body”和“值本身是 XML 的参数”做检测。
+    # full_payload_scan 开启时再额外纳入 Cookie/Header 里的 XML，并追发更多带内模板与编码 tamper。
+
+    # 深度检测：①追发 oob_templates_extra 里更激进的带外变体（参数实体+外部 DTD、ftp 等）；
+    # ②允许对被 WAF 拦截的带内 payload 追发编码 tamper（UTF-16/UTF-7/DOCTYPE 内换行）绕过。
+    # 默认开启，追求覆盖面；每个带外变体多占一个带外域名 + 一次请求。
+    deep_tamper: true
+    deep_tamper_max_profiles: 2
+
+    # OOB 带外检测：对接 projectdiscovery 免费公共 interactsh 服务，确认盲打 XXE。
+    # 前提：目标能对外发起 DNS/HTTP 请求（内网无出网时带外静默，由带内文件读取兜底）。
+    oob:
+      enabled: true
+      # 不填 server 则自动在官方公共服务器间挑一个可用的（oast.pro / oast.fun …）。
+      # server: oast.pro
+      # token: ""
+      # 后台轮询回连的间隔（秒）。
+      poll_interval: 15
+
+  # SSTI（服务端模板注入）检测插件。独立队列，先做 SSTI 专属流量筛选再主动检测。
+  # 筛选条件：参数值已有模板分隔符，或参数名/路径像 template/content/preview/message/search，
+  # 或原始响应反射了文本值，或响应里出现模板引擎线索。这样不会把所有普通 id/token 参数推进 SSTI。
+  # 检测方法追求通用低误报：
+  #   1. 算术回显：{{A*B}}、${A*B}、#{A*B}、*{A*B}、<%=A*B%>、Velocity、Smarty、
+  #      Django/Liquid filter、Thymeleaf inline 等，响应出现随机乘积/和且 baseline 不含才确认。
+  #   2. 字符串转换：upper/upcase/toUpperCase/upper_case 输出随机大写 marker，payload 本身不含该大写值。
+  #   3. 模板错误：输出型未命中时少量发送非法模板语法，响应新增 Jinja/Twig/Freemarker/Thymeleaf/
+  #      Velocity/Smarty/Mako/Liquid/Razor/EJS 等错误指纹才报告。
+  # 默认不使用 RCE/sleep 类 payload，避免把 SSTI 探测升级成命令执行；编码绕过只在 WAF 拦截或
+  # deep_tamper/full_payload_scan 时追加。
+  ssti:
+    enabled: true
+
+    # 可选：覆盖 SSTI 独立队列的 worker 数和队列上限。不写时用 scan.worker_count / scan.queue_size。
+    # worker_count: 3
+    # queue_size: 200
+
+    # 深度 tamper：普通 payload 没命中、也没明显 WAF 拦截时，再追加少量 URL 编码分隔符绕过。
+    # SSTI 基础 payload 已经较多，默认关闭；遇到过滤强的目标可临时打开或使用 --full-payload-scan。
+    deep_tamper: false
+    deep_tamper_max_profiles: 2
+
+    # 输出型未命中时是否启用模板错误指纹检测。
+    error_detection: true
+
+    # 参与 SSTI 筛选的参数值最大长度，避免大文本/大 token 造成请求膨胀。
+    max_candidate_value_length: 2000
+
+  # redir：开放重定向 + CRLF/响应头注入检测插件。独立队列，先做 redirect/url/header
+  # 语义筛选再主动检测。两类问题合并为一种漏洞“跳转/响应头注入”（报告里用 technique 区分）：
+  #   1. 开放重定向：注入唯一 example.com 子域，不跟随跳转；响应 Location/Refresh/meta refresh
+  #      解析到该外部域名才确认。
+  #   2. 响应头注入：注入唯一 X-Pass-Scan-* 响应头；只有响应头里真实出现该 header 才确认。
+  # 常见绕过（协议相对、userinfo 白名单、路径/片段白名单、大小写 scheme、单双 URL 编码、
+  # 反斜杠归一、CRLF/LF/双编码/%u000d%u000a）已直接并进基础/extra payload。
+  redir:
+    enabled: true
+
+    # 可选：覆盖 redir 独立队列的 worker 数和队列上限。不写时用 scan.worker_count / scan.queue_size。
+    # worker_count: 3
+    # queue_size: 200
+
+    # 追发 extra 绕过变体。默认开启，覆盖更广；关闭后只发核心 payload。
+    deep_tamper: true
+
+  # 敏感信息泄漏检测插件。独立队列，被动扫描响应正文/响应头，并对每个 host + 应用路径段轻量
+  # 主动探测一次常见泄漏端点：目录列出、.git/.svn/.env/.DS_Store、Java 配置文件、Swagger/OpenAPI、Spring Boot actuator。
+  # 覆盖 AK/SK、API key/Token、地图 key、私钥、数据库连接串以及上述调试/配置端点泄漏。
+  # 静态 JS 也会进入本插件检测。
+  sensitive_info:
+    enabled: true
+
+    # 可选：覆盖敏感信息独立队列的 worker 数和队列上限。不写时用 scan.worker_count / scan.queue_size。
+    # worker_count: 3
+    # queue_size: 200
+
+    # 主动端点探测。关闭后只做被动响应内容检测。
+    active_probe: true
+
+    # 可选：完全覆盖默认主动探测端点列表。默认列表在 pass_scan/sensitive_info/si_scanner.py。
+    # 目录/入口型端点默认只保留入口，例如 /、.git/、.svn/、swagger-ui/、actuator。
+    # active_endpoints:
+    #   - .git/
+    #   - .svn/
+    #   - .env
+
+    # 同 host 下按前几段路径补探应用根。例如 /app/api/user 且 depth=1 时，会探 / 和 /app。
+    path_segment_depth: 1
+
+    # 单个响应参与规则匹配的最大字符数，避免超大页面拖慢正则。
+    max_scan_chars: 300000
+
+    # 主动探测单个响应最多读取多少字节。默认不主动抓 actuator/heapdump 这类大文件。
+    max_active_body_bytes: 262144
+
+  # OSS / 对象存储桶检测插件。独立队列。先在当前流量里被动收集域名/桶线索，
+  # 再用短超时逐个访问确认存储桶；桶发现阶段不进入漏洞检测队列：
+  # 支持 Aliyun OSS、AWS S3/S3-compatible、Tencent COS、Huawei OBS、Google Cloud Storage、
+  # Azure Blob、Baidu BOS、Volcengine TOS、Qiniu 和带对象存储响应头的自定义域名。
+  # 一旦发现桶，立即输出“存在存储桶”结果；随后仅对已发现的桶入队检测：
+  #   1. 匿名列举/遍历：GET ?list-type=2 / ?max-keys / Azure comp=list。
+  #   2. 任意文件上传与覆盖：匿名 PUT 一个 pass-scan-canary 随机小文本对象，再 PUT 覆盖同一路径，
+  #      最后尽量 DELETE 清理；不触碰已有对象。
+  #   3. AK/SK 泄露：扫描当前流量、公开列举结果和少量文本对象里的 AccessKeyId/SecretAccessKey。
+  object_storage:
+    enabled: true
+
+    # 匿名列举和公开对象内容探测。关闭后仍会做被动桶发现和当前流量里的 AK/SK 匹配。
+    active_probe: true
+
+    # 匿名上传/覆盖探测。会写入随机小文件 pass-scan-canary/<uuid>.txt 并尝试清理。
+    active_write_probe: true
+
+    # 桶可列举时，是否抓取少量文本对象继续检查 AK/SK 泄露。
+    scan_listed_objects: true
+
+    # 单条流量最多识别并入队多少个桶，避免大型 JS 配置一次拖出太多目标。
+    max_buckets_per_context: 8
+
+    # 单条流量最多访问确认多少个被动收集到的域名，避免大型页面无限发散。
+    max_domains_per_context: 40
+
+    # 入队前“候选域名确认”请求超时，单位秒。这个阶段在代理回调里执行，保持短超时。
+    discovery_timeout: 4
+
+    # 桶可列举时最多抓取多少个文本对象做 AK/SK 检测。
+    max_listed_objects_scan: 12
+
+    # 单个响应参与规则匹配的最大字符数。
+    max_scan_chars: 400000
+
+    # 主动探测单个响应最多读取多少字节。
+    max_active_body_bytes: 262144
+
+  # 文件上传漏洞检测插件。独立队列，先做上传流量筛选再主动检测：
+  #   1. 只让 multipart 文件 part、二进制 PUT/PATCH、base64/data URI 文件字段、upload/file/avatar/image
+  #      等语义入口入队，避免把普通表单/API 全部当成上传点。
+  #   2. 先上传 harmless canary 文本，解析响应里的 URL/path/key/Location，并访问确认真实落点。
+  #   3. 再测试危险扩展（php/phtml/jsp/aspx/asp/ashx）、双扩展/大小写/尾随点/分号、
+  #      IIS/Tomcat 目录解析、Nginx/PHP-FPM PathInfo、Apache 多后缀、真实 GIF/PNG/JPEG 图片马、
+  #      HTML/SVG 主动内容、.htaccess canary 和 .htaccess AddType/AddHandler 链式解析。
+  #   4. 只有访问到上传文件 marker、脚本执行返回 marker、HTML/SVG 被 inline 返回，或中间件派生 URL
+  #      执行 marker 时才输出结果；证据里用 technique/confidence 区分具体类型。
+  file_upload:
+    enabled: true
+
+    # 单条原始上传请求体过大时跳过，避免把大型视频/压缩包复制多次主动重放。
+    max_original_body_bytes: 5242880
+
+    # 每个上传字段最多尝试多少个危险/绕过 payload。默认顺序保证脚本、HTML/SVG、真实图片马、
+    # .htaccess 和常见中间件解析绕过都会覆盖到。
+    max_payloads_per_candidate: 30
+
+    # 每次上传响应最多解析并访问多少个候选文件 URL。包含原始 URL 和中间件解析派生 URL。
+    max_verify_urls: 24
+
+    # 上传请求超时与访问验证请求超时。访问验证走派生 URL，默认短一些，避免单个错误路径拖住队列。
+    upload_timeout_seconds: 10
+    verify_timeout_seconds: 3
+
+    # 上传结果可能落到 CDN/对象存储域名。开启后允许访问响应里解析出的外部 http/https URL 做确认。
+    allow_external_verification: true
+
+    # 对确认包含自身 marker 的文件 URL 尝试 DELETE 清理；失败则静默忽略。
+    cleanup_uploaded_files: true
+
+  # JWT 漏洞检测插件。独立队列，默认只跑高信号、低误报的检测：
+  #   1. 从 Authorization、Cookie、query/form/json、响应头、Set-Cookie、响应正文中识别可解析 JWT。
+  #   2. 纯发现不输出结果；发现 JWT 后入 jwt 队列，队列内再检测风险。
+  #   3. 默认保留：签名未校验、alg=none、弱 HMAC secret、敏感 claim、URL/不安全 Cookie 暴露、
+  #      已过期或 nbf 未来的请求 token 仍被接受。
+  #   4. 默认关闭低频/噪声较高的扩展项：RS/HS 混淆、JWK 头信任、kid 注入、jku/x5u/kid 远程 key
+  #      获取/OOB、弱 secret 后 claim tamper。需要打靶场或专项验证时再手动打开。
+  jwt:
+    enabled: true
+
+    # 是否对请求侧 JWT 做主动重放验证。关闭后仍会做敏感 claim 和暴露位置等被动风险检测。
+    active_probe: true
+
+    # 对 HS256/384/512 做轻量通用弱密钥字典校验；不是爆破，只覆盖常见默认/弱 secret 与 host/iss 派生词。
+    weak_secret_scan: true
+
+    # 以下扩展检测默认关闭：实际项目中命中率低、误报/噪声或副作用更高。
+    # 弱 secret 命中后，是否重签权限/时间/iss/aud 变体做主动确认。
+    claim_tamper: false
+
+    # 是否尝试 RS/HS 算法混淆。
+    algorithm_confusion_scan: false
+
+    # 是否尝试 header 内嵌 jwk 信任问题。
+    embedded_jwk_scan: false
+
+    # 是否尝试 kid 路径/SQL 注入类绕过。
+    kid_injection_scan: false
+
+    # 是否尝试 jku/x5u/kid URL 远程 key 获取/OOB。
+    remote_key_fetch_scan: false
+
+    # algorithm_confusion_scan 开启时，是否从 iss/jku/x5u/JWKS 获取公钥材料。
+    jwks_discovery: false
+
+    # 单条流量最多识别并处理多少个 JWT，避免大型响应中 token 样例过多。
+    max_tokens_per_context: 12
+
+    # 单条文本响应参与 JWT 搜索的最大字符数。
+    max_scan_chars: 400000
+
+    # HMAC 弱密钥候选上限。
+    max_secret_candidates: 160
+
+    # OOB 远程 key 获取检测：构造 jku/x5u/kid URL 指向唯一 interactsh 域名。
+    # 目标如果解析/请求该域名，则确认服务端信任 token 头里的远程 key 位置或存在 key-fetch SSRF 行为。
+    oob:
+      enabled: false
+      poll_interval: 15
+
+  # Agent 逻辑漏洞检测插件。默认关闭，只有运行 python3 run.py --logic 时启用。
+  # 插件会把流量结构化索引到 SQLite，并把 Agent 判断结果写入单独的逻辑漏洞标签页。
+  logic_agent:
+    enabled: false
+    worker_count: 3
+    queue_size: 50
+    output_file: logs/logic_vulns.jsonl
+    sqlite_file: logs/logic_pass_scan.db
+    env_file: .env
+    llm_protocol: openai
+    temperature: 0.1
+    llm_timeout_seconds: 60
+    llm_max_tokens: 4096
+    request_timeout_seconds: 12
+    max_response_body_bytes: 262144
+    prompt_chars: 50000
+    max_flows_per_endpoint: 30
+    max_candidates_per_endpoint: 6
+    max_alternate_identities_per_candidate: 3
+
+    # 逻辑漏洞内置差分验证会按配置重放请求；当前默认包含写方法，允许做破坏性验证。
+    active_verification_methods:
+      - GET
+      - HEAD
+      - POST
+      - PUT
+      - PATCH
+      - DELETE
+
+  # 指纹识别插件：识别目标用的框架/语言/中间件/CMS/GitHub 开源应用。
+  fingerprint:
+    enabled: true
+
+    # 主动补包按“路径段”限流：同一段只补抓一次入口页，后续同段真实路径
+    # 仍会继续做被动识别，以便发现 /app/admin、/app/swagger 等后续指纹。
+    # path_segment_depth=1：/grafana/login 和 /grafana/dash 的主动补包归到 /grafana。
+    # 设为 2 则主动补包粒度更细，请求更多。
+    path_segment_depth: 1
+
+    # 每个 host 最多识别多少个归一真实路径样本；数字 ID/UUID/hash 会折叠，
+    # 防止 /article/1、/article/2 这类动态路径吃光预算。
+    max_paths_per_host: 25
+
+    # 主动补包：某个路径段过滤后未命中时，请求该路径落地页和（站点级）/favicon.ico，
+    # 大幅提升识别率（尤其是开源项目）。关掉则退化为纯被动，只看已有流量。
+    active_probe: true
+
+    # 是否抓取 /favicon.ico 计算 mmh3 hash（Shodan/FOFA 同款），用于精确识别开源项目。
+    # favicon 是站点级资源，每个 host 只抓一次。
+    fetch_favicon: true
+
+    # 默认过滤低价值指纹，只上报 CMS、应用框架、管理后台、API 文档、
+    # 中间件控制台等对渗透决策更有用的结果。设为 true 可恢复输出
+    # Nginx/PHP/jQuery/Google Analytics/HSTS/CDN 等全量命中。
+    report_low_value: false
+
+    # 识别结果输出文件（每个 host+触发路径样本 一条，报告按 host 聚合指纹）。
+    output_file: logs/fingerprints.jsonl
+
+    # 抓到 favicon 但规则库没命中的 host+路径 记录到这里，方便后续补充规则。
+    unknown_file: logs/fingerprints_unknown.jsonl
