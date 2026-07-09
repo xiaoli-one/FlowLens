@@ -4,7 +4,7 @@ import sys
 import time
 from urllib.parse import urlsplit
 
-from mitmproxy import ctx, http
+from mitmproxy import http
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))
 if PROJECT_ROOT not in sys.path:
@@ -22,26 +22,25 @@ class MitmTrafficAddon:
 
     def load(self, loader):  
         os.makedirs(os.path.dirname(LOG_FILE) or ".", exist_ok=True)
-        ctx.log.info("pass_scan addon loaded")
-        ctx.log.info(f"writing traffic to {LOG_FILE}")
 
     def request(self, flow: http.HTTPFlow):  # 处理请求，记录开始时间
         flow.metadata["pass_scan_start_time"] = time.time()
 
     def response(self, flow: http.HTTPFlow):
+        if self.scanner.should_ignore_flow(flow):
+            return
+
         record = self.build_record(flow)
         self.write_record(record)
-        self.scanner.check(record)
-
-        request = record["request"]
-        response = record["response"]
-        ctx.log.info(
-            f'{response["status_code"]} {request["method"]} {request["url"]}'
-        )
+        scan_flow = flow.copy()
+        self.scanner.check(record, scan_flow)
 
     def error(self, flow: http.HTTPFlow):
+        if self.scanner.should_ignore_flow(flow):
+            return
+
         if flow.error:
-            ctx.log.warning(f"{flow.request.method} {flow.request.url} -> {flow.error}")
+            return
 
     def build_record(self, flow: http.HTTPFlow):
         started_at = flow.metadata.get("pass_scan_start_time", time.time())
