@@ -1,0 +1,108 @@
+# SSTI（Server-Side Template Injection）规则库。
+#
+# 设计目标：覆盖主流服务端模板语法，同时保持低误报。
+#
+# 核心判定：
+#   1. 输出型：发送不会直接包含预期结果的表达式，例如 {{9321*8473}}。
+#      只有服务端模板引擎执行表达式时，响应里才会出现乘积；原样反射只会出现表达式本身。
+#   2. 字符串转换型：发送小写随机 marker 的 upper/upcase/toUpperCase 表达式。
+#      预期输出是大写 marker；payload 中不含大写 marker，普通反射不会命中。
+#   3. 模板错误型：输出型未命中后，少量发送非法模板语法。只有响应新增已知模板引擎错误
+#      指纹，才作为 SSTI 报告。
+#
+# 注意：
+#   - 不默认使用 RCE/sleep 类 payload，避免把 SSTI 探测升级成命令执行。
+#   - URL 编码/二次编码绕过放在 tamper 阶段，只在 WAF 拦截或深度扫描时追加。
+
+probe_payloads:
+  # Jinja2 / Twig / Nunjucks / Pebble / Tornado 等双花括号表达式。
+  - { name: double_curly_math, family: jinja2_twig_nunjucks_pebble, technique: arithmetic_echo, expected: product, template: '{{{a}*{b}}}' }
+  - { name: double_curly_math_spaced, family: jinja2_twig_nunjucks_pebble, technique: arithmetic_echo, expected: product, template: '{{ {a} * {b} }}' }
+  - { name: double_curly_upper_filter, family: jinja2_twig_django_nunjucks_pebble, technique: string_transform, expected: upper_marker, template: '{{"{marker}"|upper}}' }
+  - { name: double_curly_upper_filter_spaced, family: jinja2_twig_django_nunjucks_pebble, technique: string_transform, expected: upper_marker, template: '{{ "{marker}" | upper }}' }
+  - { name: jinja_set_math, family: jinja2_twig_nunjucks, technique: arithmetic_echo, expected: product, template: '{% set ssti_probe={a}*{b} %}{{ ssti_probe }}' }
+
+  # Django / Liquid 这类常见过滤器语法，算术用加法过滤器，避免引擎不支持 * 表达式。
+  - { name: django_add_filter, family: django, technique: arithmetic_echo, expected: sum, template: '{{ {a}|add:{b} }}' }
+  - { name: liquid_plus_filter, family: liquid, technique: arithmetic_echo, expected: sum, template: '{{ {a} | plus: {b} }}' }
+  - { name: liquid_upcase_filter, family: liquid, technique: string_transform, expected: upper_marker, template: '{{ "{marker}" | upcase }}' }
+
+  # FreeMarker / JSP EL / Mako / Spring EL 常见 ${...}。
+  - { name: dollar_curly_math, family: freemarker_jsp_el_mako_spel, technique: arithmetic_echo, expected: product, template: '${{a}*{b}}' }
+  - { name: dollar_curly_math_spaced, family: freemarker_jsp_el_mako_spel, technique: arithmetic_echo, expected: product, template: '${ {a} * {b} }' }
+  - { name: freemarker_upper_builtin, family: freemarker, technique: string_transform, expected: upper_marker, template: '${"{marker}"?upper_case}' }
+  - { name: mako_upper_method, family: mako, technique: string_transform, expected: upper_marker, template: '${"{marker}".upper()}' }
+
+  # Thymeleaf / Spring EL / Pug / Jade / JSF 风格。
+  - { name: hash_curly_math, family: thymeleaf_spel_pug_jsf, technique: arithmetic_echo, expected: product, template: '#{{a}*{b}}' }
+  - { name: star_curly_math, family: thymeleaf, technique: arithmetic_echo, expected: product, template: '*{{a}*{b}}' }
+  - { name: thymeleaf_inline_math, family: thymeleaf, technique: arithmetic_echo, expected: product, template: '[[${{a}*{b}}]]' }
+
+  # ERB / EJS / ASP classic。
+  - { name: erb_ejs_math, family: erb_ejs_asp, technique: arithmetic_echo, expected: product, template: '<%={a}*{b}%>' }
+  - { name: erb_ejs_math_spaced, family: erb_ejs_asp, technique: arithmetic_echo, expected: product, template: '<%= {a} * {b} %>' }
+  - { name: ejs_upper_method, family: ejs, technique: string_transform, expected: upper_marker, template: '<%="{marker}".toUpperCase()%>' }
+  - { name: erb_upper_method, family: erb, technique: string_transform, expected: upper_marker, template: '<%="{marker}".upcase%>' }
+
+  # Velocity / Smarty / Razor / doT.js。
+  - { name: velocity_set_math, family: velocity, technique: arithmetic_echo, expected: product, template: '#set($ssti_probe = {a} * {b})$ssti_probe' }
+  - { name: velocity_upper_method, family: velocity, technique: string_transform, expected: upper_marker, template: '#set($ssti_probe = "{marker}")$ssti_probe.toUpperCase()' }
+  - { name: smarty_math, family: smarty, technique: arithmetic_echo, expected: product, template: '{math equation="x*y" x={a} y={b}}' }
+  - { name: smarty_upper_modifier, family: smarty, technique: string_transform, expected: upper_marker, template: '{"{marker}"|upper}' }
+  - { name: razor_math, family: razor, technique: arithmetic_echo, expected: product, template: '@({a}*{b})' }
+  - { name: razor_upper_method, family: razor, technique: string_transform, expected: upper_marker, template: '@("{marker}".ToUpper())' }
+  - { name: dotjs_math, family: dotjs, technique: arithmetic_echo, expected: product, template: '{{={a}*{b}}}' }
+
+error_payloads:
+  - { name: double_curly_syntax_error, family: jinja2_twig_django_nunjucks_pebble, template: '{{{marker}*}}' }
+  - { name: block_tag_syntax_error, family: jinja2_twig_nunjucks, template: '{% ssti_invalid_{marker} %}' }
+  - { name: dollar_curly_syntax_error, family: freemarker_jsp_el_mako_spel, template: '${{marker}*}' }
+  - { name: erb_ejs_syntax_error, family: erb_ejs_asp, template: '<%={marker}*%>' }
+  - { name: hash_curly_syntax_error, family: thymeleaf_spel_pug_jsf, template: '#{{marker}*}' }
+
+template_error_patterns:
+  - { family: jinja2, pattern: '(?i)jinja2\\.exceptions|TemplateSyntaxError|UndefinedError' }
+  - { family: django, pattern: '(?i)django\\.template\\.(exceptions\\.)?TemplateSyntaxError|Invalid block tag|Could not parse the remainder' }
+  - { family: twig, pattern: '(?i)Twig\\(Error|Exception)|Twig_Error|Unknown ".*" tag|Unexpected token .* in template' }
+  - { family: freemarker, pattern: '(?i)FreeMarker template error|freemarker\\.core|freemarker\\.template|FTL stack trace' }
+  - { family: jsp_el, pattern: '(?i)(javax|jakarta)\\.el\\.ELException|PropertyNotFoundException|MethodNotFoundException' }
+  - { family: thymeleaf_spel, pattern: '(?i)org\\.thymeleaf\\.exceptions|SpelEvaluationException|EL100[0-9]E|SpringEL' }
+  - { family: velocity, pattern: '(?i)VelocityException|org\\.apache\\.velocity|ParseErrorException' }
+  - { family: smarty, pattern: '(?i)Smarty.*(error|exception|syntax)|syntax error in template' }
+  - { family: mako, pattern: '(?i)mako\\.exceptions|Mako RuntimeException|CompileException: .*template' }
+  - { family: tornado, pattern: '(?i)tornado\\.template|ParseError: .*template' }
+  - { family: handlebars_mustache, pattern: '(?i)HandlebarsException|MustacheException|mustache\\.Template|Parse error on line .* handlebars' }
+  - { family: liquid, pattern: '(?i)Liquid error|Liquid::SyntaxError|Liquid syntax error' }
+  - { family: erb_rails, pattern: '(?i)ERB::|ActionView::Template::Error|ActionView::SyntaxErrorInTemplate' }
+  - { family: ejs, pattern: '(?i)EJS|ejs\\.co|Could not find matching close tag|SyntaxError.*while compiling ejs' }
+  - { family: razor, pattern: '(?i)RazorEngine|RazorLight|RuntimeBinderException|The name .* does not exist in the current context' }
+  - { family: pebble, pattern: '(?i)PebbleException|com\\.mitchellbosecke\\.pebble|io\\.pebbletemplates\\.pebble' }
+
+waf_detection:
+  status_codes: [403, 406, 429, 501, 999]
+  header_keywords:
+    - x-waf
+    - waf
+    - cloudflare
+    - x-sucuri-id
+    - incapsula
+    - x-denied-reason
+  body_keywords:
+    - waf
+    - forbidden
+    - access denied
+    - blocked
+    - security policy
+    - not acceptable
+    - 拦截
+    - 非法请求
+    - 已被防火墙
+    - 安全防护
+
+max_tampered_payloads_per_probe: 2
+
+tamper_profiles:
+  - { name: compact_spaces, tampers: [compact_spaces] }
+  - { name: url_encode_delimiters, tampers: [url_encode_delimiters] }
+  - { name: double_url_encode_delimiters, tampers: [double_url_encode_delimiters] }
+  - { name: quote_and_url_encode_delimiters, tampers: [quote_url_encode, url_encode_delimiters] }
