@@ -57,7 +57,7 @@
 | `vuln_verify/` | 主动漏洞验证 Agent |
 | `tools/` | 辅助脚本和 interactsh 客户端 |
 
-更多实现细节见 `pass_scan/TECHNICAL_DOC.md`。各插件目录下也包含对应的技术文档。
+更多实现细节见各插件目录下 `TECHNICAL_DOC.md`。
 
 ## 环境要求
 
