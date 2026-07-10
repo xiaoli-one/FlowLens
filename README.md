@@ -68,7 +68,7 @@ python3 -m pip install -r requirements.txt
 ```
 
 - 普通扫描不依赖 LLM 配置。只有启用 `--logic/--only-logic` 或 `--verify` 时才需要配置模型服务。
-- 配置 LLM API 在 `.env` 中修改。
+- 配置 LLM API 在 `.env` 中修改，兼容多种认证协议。
 
 
 ## 快速开始
