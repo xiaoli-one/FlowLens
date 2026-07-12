@@ -1,6 +1,6 @@
 # FlowLens
 
-![Uploading image.png…]()
+![运行截图](static/imgs/run.png)
 
 
 `FlowLens` 是一个基于 `mitmproxy/mitmdump` 的被动流量安全检测工具。它通过本地代理接收浏览器、BurpSuite 或其他客户端转发的 HTTP/HTTPS 流量，记录请求与响应，并把符合条件的流量提交给插件后台验证，最终输出 JSONL 结果和静态 HTML 报告。
