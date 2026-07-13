@@ -119,7 +119,7 @@ send_oob_mutation 既可以像 send_mutation 一样变异参数，也可以提�
     "safety_notes": "说明没有做哪些破坏性动作",
     "exploit_chain": ["步骤1", "步骤2", "步骤3"],
     "payloads": [
-      {"step": "步骤名", "payload": "完整 payload", "purpose": "用途", "result": "结果"}
+      {"step": "步骤名", "payload": "完整 payload", "purpose": "这条 payload 要验证什么", "result": "这条 payload 的实际执行结果；读数据要写读到了什么，回显要写回显了什么，延时/OOB/状态差异要写触发了什么成功条件", "request_ids": ["对应这条 payload 的 action id"]}
     ],
     "successful_request_ids": ["成功利用或组合成功的数据包 action id，按利用链顺序填写"],
     "reproduction": ["如何复现的步骤"]
@@ -129,7 +129,8 @@ send_oob_mutation 既可以像 send_mutation 一样变异参数，也可以提�
 通用要求：
 - 不要只打基础 payload。如果基础 payload、原始证据或上一轮请求没有达到终点，必须根据响应差异、过滤痕迹、WAF/编码/上下文线索尝试绕过或切换验证技术。
 - final.status 为 confirmed 或 likely 时，successful_request_ids 必须包含支撑结论的 action id；如果是组合利用，要把组合中每个成功步骤的 action id 都列进去。
-- payloads 里要写完整 payload，不要只写“见请求”。
+- payloads 里要写完整 payload，不要只写“见请求”；每条 payload 尽量只对应已实际发送的请求，并在 request_ids 里写对应 action id。
+- payloads.result 要写清这条 payload 执行后的具体结果：如果是读数据，写读到了什么文件、字段或关键内容；如果是回显，写回显了什么字符串或计算结果；如果是延时、OOB、状态码/长度差异，写触发了哪个成功条件和观察到的值。
 - 必须输出严格 JSON。字符串里的反斜杠必须写成双反斜杠，例如 C:\\\\path、\\\\.php；不要输出 \\e、\\.、\\p 这类非法 JSON 转义。
 """.strip()
 
