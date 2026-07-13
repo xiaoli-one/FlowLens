@@ -429,7 +429,7 @@ class HttpExecutor:
     def __init__(self, config):
         self.config = config or {}
         self.timeout = float(self.config.get("request_timeout_seconds", 12))
-        self.max_body_bytes = int(self.config.get("max_response_body_bytes", 262144))
+        self.max_body_bytes = int(self.config.get("max_response_body_bytes", 0) or 0)
         self.observation_chars = int(self.config.get("observation_chars", 12000))
         self.allowed_methods = {
             method.upper()
@@ -870,13 +870,13 @@ class HttpExecutor:
             status_code = response.getcode() or 0
             reason = getattr(response, "reason", "") or ""
             response_headers = dict(response.headers.items())
-            body = response.read(self.max_body_bytes)
+            body = self.read_response_body(response)
         except HTTPError as exc:
             status_code = exc.code
             reason = getattr(exc, "reason", "") or ""
             response_headers = dict(exc.headers.items()) if exc.headers else {}
             try:
-                body = exc.read(self.max_body_bytes)
+                body = self.read_response_body(exc)
             except Exception:
                 body = b""
         except (URLError, TimeoutError, OSError) as exc:
@@ -899,9 +899,14 @@ class HttpExecutor:
             "status_code": status_code,
             "elapsed_ms": elapsed_ms,
             "request": request_template.as_packet(redacted=True),
-            "response": trim_text(response_packet, self.observation_chars),
+            "response": response_packet,
             "response_excerpt": trim_text(text, self.observation_chars),
         }
+
+    def read_response_body(self, response):
+        if self.max_body_bytes > 0:
+            return response.read(self.max_body_bytes)
+        return response.read()
 
     def safety_error(self, request_template, action):
         if request_template.method not in self.allowed_methods:
