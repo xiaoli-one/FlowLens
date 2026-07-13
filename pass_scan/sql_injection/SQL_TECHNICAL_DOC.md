@@ -40,7 +40,7 @@ Cookie 会按下标替换指定值；短文本 base64 Cookie 会尽量重新 bas
 | 报错注入 | `check_error_based()` | 响应新增数据库错误指纹 |
 | 布尔盲注 | `check_boolean_based()` | true 响应接近 baseline，false 响应显著不同 |
 | Inline Query | `check_inline_query()` | SQL 表达式产生的唯一 marker 出现在响应中 |
-| UNION Query | `check_union_based()` | 枚举列数和 marker 列，响应出现 UNION marker |
+| UNION Query | `check_union_based()` | 默认覆盖闭合方式/列数，全量模式枚举 marker 列 |
 | Stacked Query | `check_stacked_query()` | control/delay 成对稳定延时 |
 | 时间盲注 | `check_time_based()` | 两轮 control/delay 差值超过阈值 |
 
@@ -57,12 +57,14 @@ Cookie 会按下标替换指定值；短文本 base64 Cookie 会尽量重新 bas
 
 `rules.yaml` 中的 `waf_detection` 定义状态码、响应头和响应体关键词。插件发现疑似 WAF 拦截时，会按 `tamper_profiles` 追发变形 payload，并把 `waf_bypass`、`tamper_profile`、`tampers` 写入证据。
 
-非 WAF 场景下的 deep tamper 由 `config.yaml` 控制：
+默认模式使用覆盖集，不对每条未命中 payload 主动追加 tamper；明确检测到
+WAF 拦截时仍会按需尝试绕过。非 WAF 场景下如需手动开启 deep tamper，
+继续使用原有配置：
 
 ```yaml
 plugins:
   sql_injection:
-    deep_tamper: true
+    deep_tamper: false
     deep_tamper_max_profiles: 4
     deep_tamper_methods:
       - error_based
@@ -70,7 +72,21 @@ plugins:
       - inline_query
 ```
 
-默认不对 `union_based`、`stacked_query`、`time_based` 做 deep tamper，避免高成本请求膨胀。
+`--full-payload-scan` 是现有的 tamper 模式：额外扫描 Cookie/Header，UNION
+从覆盖集切换为完整 marker 位置枚举，并对 UNION 之外的检测类型追加最多 6 个
+代表性 tamper。UNION 只有明确被 WAF 拦截时才追加 tamper，避免组合爆炸。
+
+## 默认覆盖集与请求预算
+
+默认模式仍保留报错、布尔、Inline、UNION、Stacked、时间、ORDER BY、
+宽字节以及 MySQL/PostgreSQL/MSSQL/Oracle/SQLite 相关场景，但不再把同义
+注释、编码和闭合方式做笛卡尔积。稳定阴性、单参数、无 WAF 时的基础上限
+约为 167 次请求；任一证据确认后立即停止，实际命中场景通常明显少于此数。
+
+默认 UNION 为 8 种闭合方式 × 6 种列数，每个组合选一个轮换的 marker
+位置，共 48 条。`--full-payload-scan` 才恢复 168 条完整位置枚举。
+发送前还会按最终 URL/body/header 去重，原始写法不同但线上字节相同的 payload
+只发送一次。
 
 ## 规则文件
 
@@ -91,7 +107,7 @@ plugins:
 - `waf_detection`
 - `tamper_profiles`
 
-`rules.py` 负责 YAML 加载、模板渲染和 SQL 错误正则编译。`tamper.py` 提供确定性字符串变形，例如空白替换、关键字大小写、注释切分、URL 编码、MySQL hex/char 字符串等。
+`rules.py` 负责 YAML 加载、模板渲染和 SQL 错误正则编译。`tamper.py` 提供确定性字符串变形，例如空白替换、关键字大小写、注释切分、URL 编码和 MySQL hex 字符串等。
 
 ## 输出结构
 
@@ -147,12 +163,15 @@ SQL 注入的检测技术按证据强度和成本分层：
 | 层级 | 技术 | 设计理由 |
 | --- | --- | --- |
 | 低成本 | 报错注入 | 一次请求即可得到数据库错误特征，命中时置信度高 |
-| 中成本 | 布尔盲注 | 通过 true/false 响应差异确认，不依赖错误回显 |
+| 中成本 | 布尔盲注 | true/false 命中后反序重发确认，不依赖错误回显 |
 | 中成本 | inline marker | 让 SQL 表达式产生唯一 marker，适合能回显表达式结果的场景 |
-| 较高成本 | UNION | 需要列数探测，但能推进到数据回显证明 |
-| 高成本 | stacked/time | 需要等待延时和二次确认，用于无回显场景 |
+| 较高成本 | time | control/delay 二次确认，优先覆盖无回显盲注 |
+| 较高成本 | UNION | 默认使用闭合/列数覆盖集，能推进到数据回显证明 |
+| 高成本 | stacked | 作为多语句执行场景的最后兜底 |
 
-这样排序是为了控制请求量。一个普通参数如果报错已经确认，就不需要继续跑 UNION 或时间盲注。只有低成本技术不能证明时，才逐步升级。
+这样排序是为了控制请求量。一个普通参数如果报错已经确认，就不需要继续跑
+布尔、时间或 UNION。时间盲注放在 UNION 前，避免无回显漏洞先承担 UNION
+组合探测；Stacked 最后兜底多语句执行场景。
 
 ### Baseline 的作用
 
@@ -198,6 +217,7 @@ JSON 参数会保留路径，例如 `user.id`、`items[0].sku`。变异时只替
 - true 响应应该接近 baseline。
 - false 响应应该和 true/baseline 明显不同。
 - true 和 false 之间要有稳定差异。
+- 首轮疑似命中后，以 false/true 反序再发一轮，结论一致才报告。
 
 这种方法适合没有报错但存在条件分支的接口。为了降低误报，插件不会只看状态码，而会综合响应长度、相似度和内容片段。
 
@@ -207,6 +227,7 @@ Inline query 和 UNION 都尝试让数据库把唯一 marker 输出到响应里�
 
 - inline 更像在原 SQL 表达式里追加一个能返回 marker 的表达式。
 - UNION 会探测列数，并尝试把 marker 放到可显示列。
+- 默认 UNION 对每种闭合方式、每个列数选择一个代表位置；全量模式枚举全部位置。
 
 这两类一旦命中，证据比纯布尔差异更直观，因为报告里能看到 marker 被数据库查询结果带出来。
 
@@ -226,8 +247,9 @@ Inline query 和 UNION 都尝试让数据库把唯一 marker 输出到响应里�
 Tamper 不应该一开始就全量启用，否则请求量会指数级增长。插件采用按需 tamper：
 
 - 如果响应命中 WAF 规则，说明 payload 被拦截，启用绕过策略。
-- 如果配置了 deep tamper，普通 payload 未命中后追加少量变体。
-- 对 UNION、stacked、time 默认不做 deep tamper，避免成本过高。
+- 默认不开启非 WAF deep tamper；手动配置时只追加少量变体。
+- `--full-payload-scan` 对 UNION 外的场景扩大到 6 个代表性 tamper。
+- UNION 仅在明确 WAF 拦截时 tamper，避免 168 组再次成倍扩张。
 
 Tamper 的目标不是“花式 payload”，而是处理常见过滤：
 
@@ -235,7 +257,7 @@ Tamper 的目标不是“花式 payload”，而是处理常见过滤：
 - 关键字大小写或注释切分。
 - 引号和括号闭合差异。
 - URL 编码。
-- MySQL 字符串 hex/char 表达。
+- MySQL 字符串 hex 表达。
 
 ### 确认标准
 
