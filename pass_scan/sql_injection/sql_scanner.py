@@ -79,6 +79,10 @@ MAX_COMPARE_CHARS = 30000
 # 延时响应比普通响应慢多少秒，才认为可能命中。
 TIME_THRESHOLD = 3.0
 
+# --full-payload-scan 会比默认 deep tamper 多尝试两种变形，但仍保持上限，
+# 避免每条 UNION/time payload 都乘上整个 tamper 列表。
+FULL_TAMPER_PROFILE_LIMIT = 6
+
 # baseline 两次重放的相似度低于这个值，就认为页面不稳定。
 BASELINE_STABLE_MIN = 0.90
 
@@ -372,15 +376,18 @@ class SQLInjectionScanner:
             if finding:
                 return finding
 
+        # 延时证据不依赖页面内容稳定性，并且比 UNION 穷举更容易确认盲注，
+        # 所以在 marker/UNION 之后的高组合扫描前优先执行。
+        finding = self.check_time_based(flow, baseline, candidate)
+        if finding:
+            return finding
+
+        if baseline_info["stable"]:
             finding = self.check_union_based(flow, baseline, candidate)
             if finding:
                 return finding
 
         finding = self.check_stacked_query(flow, baseline, candidate)
-        if finding:
-            return finding
-
-        finding = self.check_time_based(flow, baseline, candidate)
         if finding:
             return finding
 
@@ -468,70 +475,119 @@ class SQLInjectionScanner:
             )
 
             for true_response, false_response in response_pairs:
-                if not true_response or not false_response:
-                    continue
-                if true_response.get("waf_blocked") or false_response.get("waf_blocked"):
-                    continue
-                # 超时探测的正文是空的，拿来做相似度比较会被误判成“页面剧变”，
-                # 布尔盲注必须有真实正文才能比较，所以跳过。
-                if true_response.get("timed_out") or false_response.get("timed_out"):
+                evaluation = self.evaluate_boolean_pair(
+                    baseline,
+                    true_response,
+                    false_response,
+                )
+                if not evaluation:
                     continue
 
-                true_similarity = self.similarity(baseline["text"], true_response["text"])
-                false_similarity = self.similarity(baseline["text"], false_response["text"])
-                true_false_similarity = self.similarity(
-                    true_response["text"],
-                    false_response["text"],
+                # 只对疑似命中的组合增加两次确认，并反转发送顺序，降低缓存、
+                # 限流和请求先后顺序造成的布尔盲注误报。
+                false_again, true_again = self.send_same_payload_pair(
+                    flow,
+                    candidate,
+                    false_response,
+                    true_response,
+                    baseline,
+                )
+                confirmation = self.evaluate_boolean_pair(
+                    baseline,
+                    true_again,
+                    false_again,
+                )
+                if not confirmation or confirmation["style"] != evaluation["style"]:
+                    continue
+
+                return self.build_finding(
+                    flow,
+                    candidate,
+                    "boolean_based",
+                    {
+                        "message": evaluation["message"],
+                        "payload_group": payload_group["name"],
+                        "true_payload": true_response["sent_payload"],
+                        "false_payload": false_response["sent_payload"],
+                        "baseline_stability": baseline_info["stability"],
+                        "baseline_status": baseline["status_code"],
+                        "true_status": true_response["status_code"],
+                        "false_status": false_response["status_code"],
+                        "baseline_length": baseline["length"],
+                        "true_length": true_response["length"],
+                        "false_length": false_response["length"],
+                        "true_similarity": evaluation["true_similarity"],
+                        "false_similarity": evaluation["false_similarity"],
+                        "true_false_similarity": evaluation["true_false_similarity"],
+                        "confirmation_true_similarity": confirmation["true_similarity"],
+                        "confirmation_false_similarity": confirmation["false_similarity"],
+                        "confirmation_true_false_similarity": confirmation[
+                            "true_false_similarity"
+                        ],
+                        **self.tamper_evidence(true_response),
+                    },
+                    proof_probe=true_response,
+                    extra_probes=[
+                        {
+                            "name": "false payload",
+                            "probe": false_response,
+                        },
+                        {
+                            "name": "confirmation true payload",
+                            "probe": true_again,
+                        },
+                        {
+                            "name": "confirmation false payload",
+                            "probe": false_again,
+                        },
+                    ],
                 )
 
-                true_status_ok = true_response["status_code"] == baseline["status_code"]
-                false_status_ok = false_response["status_code"] == baseline["status_code"]
-                true_like_baseline = true_similarity >= TRUE_SIMILARITY_MIN
-                false_like_baseline = false_similarity >= TRUE_SIMILARITY_MIN
-                true_changed = true_similarity <= FALSE_SIMILARITY_MAX
-                false_changed = false_similarity <= FALSE_SIMILARITY_MAX
-                true_false_changed = true_false_similarity <= TRUE_FALSE_SIMILARITY_MAX
-
-                and_style_hit = true_status_ok and true_like_baseline and false_changed
-                or_style_hit = false_status_ok and false_like_baseline and true_changed
-
-                if (and_style_hit or or_style_hit) and true_false_changed:
-                    if and_style_hit:
-                        message = "true payload is similar to baseline, false payload is different"
-                    else:
-                        message = "false payload is similar to baseline, true payload is different"
-
-                    return self.build_finding(
-                        flow,
-                        candidate,
-                        "boolean_based",
-                        {
-                            "message": message,
-                            "payload_group": payload_group["name"],
-                            "true_payload": true_response["sent_payload"],
-                            "false_payload": false_response["sent_payload"],
-                            "baseline_stability": baseline_info["stability"],
-                            "baseline_status": baseline["status_code"],
-                            "true_status": true_response["status_code"],
-                            "false_status": false_response["status_code"],
-                            "baseline_length": baseline["length"],
-                            "true_length": true_response["length"],
-                            "false_length": false_response["length"],
-                            "true_similarity": round(true_similarity, 4),
-                            "false_similarity": round(false_similarity, 4),
-                            "true_false_similarity": round(true_false_similarity, 4),
-                            **self.tamper_evidence(true_response),
-                        },
-                        proof_probe=true_response,
-                        extra_probes=[
-                            {
-                                "name": "false payload",
-                                "probe": false_response,
-                            }
-                        ],
-                    )
-
         return None
+
+    def evaluate_boolean_pair(self, baseline, true_response, false_response):
+        """判断一组 true/false 响应是否形成稳定的布尔注入证据。"""
+        if not true_response or not false_response:
+            return None
+        if true_response.get("waf_blocked") or false_response.get("waf_blocked"):
+            return None
+        if true_response.get("timed_out") or false_response.get("timed_out"):
+            return None
+
+        true_similarity = self.similarity(baseline["text"], true_response["text"])
+        false_similarity = self.similarity(baseline["text"], false_response["text"])
+        true_false_similarity = self.similarity(
+            true_response["text"],
+            false_response["text"],
+        )
+
+        true_status_ok = true_response["status_code"] == baseline["status_code"]
+        false_status_ok = false_response["status_code"] == baseline["status_code"]
+        true_like_baseline = true_similarity >= TRUE_SIMILARITY_MIN
+        false_like_baseline = false_similarity >= TRUE_SIMILARITY_MIN
+        true_changed = true_similarity <= FALSE_SIMILARITY_MAX
+        false_changed = false_similarity <= FALSE_SIMILARITY_MAX
+        true_false_changed = true_false_similarity <= TRUE_FALSE_SIMILARITY_MAX
+
+        and_style_hit = true_status_ok and true_like_baseline and false_changed
+        or_style_hit = false_status_ok and false_like_baseline and true_changed
+        if not (and_style_hit or or_style_hit) or not true_false_changed:
+            return None
+
+        if and_style_hit:
+            style = "and"
+            message = "true payload is similar to baseline, false payload is different"
+        else:
+            style = "or"
+            message = "false payload is similar to baseline, true payload is different"
+
+        return {
+            "style": style,
+            "message": message,
+            "true_similarity": round(true_similarity, 4),
+            "false_similarity": round(false_similarity, 4),
+            "true_false_similarity": round(true_false_similarity, 4),
+        }
 
     def check_inline_query(self, flow, baseline, candidate):
         """inline query 注入检测。
@@ -599,7 +655,10 @@ class SQLInjectionScanner:
         if self.is_header_candidate(candidate):
             return None
 
-        payload_groups = build_union_payload_groups(candidate["value"])
+        payload_groups = build_union_payload_groups(
+            candidate["value"],
+            exhaustive=self.full_payload_scan,
+        )
         if not payload_groups:
             return None
 
@@ -821,7 +880,7 @@ class SQLInjectionScanner:
 
         return None
 
-    def send_probe(self, flow, candidate, payload):
+    def send_probe(self, flow, candidate, payload, allow_repeat=False):
         """主动发送探测请求。
 
         candidate 为 None 表示重放原始请求。
@@ -831,6 +890,26 @@ class SQLInjectionScanner:
         method = request.method.upper()
         url, body, header_overrides = self.build_probe_request(flow, candidate, payload)
         host = urlsplit(url).netloc
+
+        if candidate and not allow_repeat:
+            request_key = (
+                method,
+                url,
+                body,
+                tuple(
+                    sorted(
+                        (str(name).lower(), str(value))
+                        for name, value in header_overrides.items()
+                    )
+                ),
+            )
+            sent_request_keys = candidate.setdefault(
+                "_pass_scan_sent_request_keys",
+                set(),
+            )
+            if request_key in sent_request_keys:
+                return None
+            sent_request_keys.add(request_key)
 
         if self.waf_state:
             self.waf_state.wait_if_needed(host)
@@ -1116,8 +1195,18 @@ class SQLInjectionScanner:
 
     def send_same_payload_pair(self, flow, candidate, left_probe, right_probe, baseline):
         """用同一组已经选中的 payload 再发一次，给延时注入做确认。"""
-        left = self.send_probe(flow, candidate, left_probe["sent_payload"])
-        right = self.send_probe(flow, candidate, right_probe["sent_payload"])
+        left = self.send_probe(
+            flow,
+            candidate,
+            left_probe["sent_payload"],
+            allow_repeat=True,
+        )
+        right = self.send_probe(
+            flow,
+            candidate,
+            right_probe["sent_payload"],
+            allow_repeat=True,
+        )
         if not left or not right:
             return left, right
 
@@ -1211,13 +1300,20 @@ class SQLInjectionScanner:
         headers_text = "\n".join(
             f"{name}: {value}" for name, value in response.get("headers", {}).items()
         ).lower()
+        baseline_headers_text = "\n".join(
+            f"{name}: {value}"
+            for name, value in (baseline or {}).get("headers", {}).items()
+        ).lower()
         for keyword in rules.get("header_keywords", []):
-            if keyword.lower() in headers_text:
+            lowered = keyword.lower()
+            if lowered in headers_text and lowered not in baseline_headers_text:
                 reasons.append(f"header:{keyword}")
 
         body_text = response.get("text", "")[:8000].lower()
+        baseline_body_text = (baseline or {}).get("text", "")[:8000].lower()
         for keyword in rules.get("body_keywords", []):
-            if keyword.lower() in body_text:
+            lowered = keyword.lower()
+            if lowered in body_text and lowered not in baseline_body_text:
                 reasons.append(f"body:{keyword}")
 
         return {
@@ -1299,16 +1395,19 @@ class SQLInjectionScanner:
     def use_deep_tamper(self, method):
         """判断某种检测方法是否启用 deep tamper。"""
         if self.full_payload_scan:
-            return True
+            # UNION 默认已经覆盖全部闭合/列数组合；对每个组合再主动乘 tamper
+            # 收益很低。真正遇到 WAF 时 send_probe_variants 仍会按需 tamper。
+            return method != "union_based"
         return self.deep_tamper and method in self.deep_tamper_methods
 
     def deep_tamper_profile_limit(self):
         """非 WAF 场景下 deep tamper 的 profile 数量上限。
 
-        full_payload_scan 打开时返回 None，表示使用 rules.yaml 里的完整 tamper 上限。
+        full_payload_scan 打开时比默认 deep tamper 多尝试两种代表性变形，
+        但不再无上限放大每一条基础 payload。
         """
         if self.full_payload_scan:
-            return None
+            return max(self.deep_tamper_max_profiles, FULL_TAMPER_PROFILE_LIMIT)
         return self.deep_tamper_max_profiles
 
     def merge_reasons(self, *reason_lists):
