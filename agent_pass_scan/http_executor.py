@@ -5,12 +5,18 @@ import ssl
 import time
 import zlib
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 from urllib.request import HTTPSHandler, Request, build_opener
 
 from agent_pass_scan.detector_base import DEFAULT_ACTIVE_VERIFICATION_METHODS
 from agent_pass_scan.traffic_model import header_value, trim_text
 from pass_scan.body_paser import decode_body_text, get_header
+
+
+def truthy(value):
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
 
 
 HOP_BY_HOP_HEADERS = {
@@ -51,6 +57,10 @@ class LogicHttpExecutor:
         self.max_alternate_identities = int(
             self.config.get("max_alternate_identities_per_candidate", 3)
         )
+        self.postcondition_readback = truthy(self.config.get("postcondition_readback", True))
+        self.max_postcondition_checks = int(
+            self.config.get("max_postcondition_checks_per_candidate", 2)
+        )
 
     def strip_auth_headers(self, headers):
         return {
@@ -69,55 +79,113 @@ class LogicHttpExecutor:
                 headers[key] = value
         return headers
 
-    def execute_candidate_verification(self, candidate):
+    def verification_actions(self, candidate):
         verification = candidate.verification or {}
-        kind = verification.get("kind")
-        source_flow = candidate.runtime_source_flow or candidate.source_flow
-        related_flows = candidate.runtime_related_flows or candidate.related_flows
+        kind = verification.get("kind") or "passive_only"
+        source_flow = candidate.runtime_source_flow or candidate.source_flow or {}
+        related_flows = candidate.runtime_related_flows or candidate.related_flows or []
+        method = (source_flow.get("method") or "GET").upper()
+
         if kind == "strip_auth":
-            return [
-                self.replay(
-                    source_flow,
-                    self.strip_auth_headers(source_flow.get("request_headers") or {}),
-                    "去除认证信息后重放原始请求",
-                )
-            ]
+            return [{"id": "strip-auth", "kind": kind, "method": method}]
         if kind == "swap_auth":
-            observations = []
-            for index, related in enumerate(related_flows[: self.max_alternate_identities], start=1):
-                observations.append(
-                    self.replay(
-                        source_flow,
-                        self.swap_auth_headers(
-                            source_flow.get("request_headers") or {},
-                            related.get("request_headers") or {},
-                        ),
-                        f"使用其他身份认证信息访问原资源 #{index}",
-                        related_flow=related,
-                    )
-                )
-            return observations
-        if kind == "same_auth_replay":
             return [
-                self.replay(
-                    source_flow,
-                    source_flow.get("request_headers") or {},
-                    "使用原认证信息重放包含敏感业务字段的请求",
+                {
+                    "id": f"swap-auth-{index}",
+                    "kind": kind,
+                    "method": method,
+                    "related_flow": related,
+                    "identity_index": index,
+                }
+                for index, related in enumerate(
+                    related_flows[: self.max_alternate_identities],
+                    start=1,
                 )
             ]
+        if kind == "same_auth_replay":
+            return [{"id": "same-auth-replay", "kind": kind, "method": method}]
         if kind == "mutate_param":
-            observations = []
-            for value in verification.get("mutations") or []:
+            return [
+                {
+                    "id": f"mutate-{index}",
+                    "kind": kind,
+                    "method": method,
+                    "new_value": value,
+                }
+                for index, value in enumerate(verification.get("mutations") or [], start=1)
+            ]
+        return []
+
+    def execute_candidate_verification(self, candidate):
+        observations = []
+        postcondition_checks = 0
+        for action in self.verification_actions(candidate):
+            allow_postcondition = postcondition_checks < self.max_postcondition_checks
+            action_observations = self.execute_verification_action(
+                candidate,
+                action,
+                allow_postcondition=allow_postcondition,
+            )
+            observations.extend(action_observations)
+            postcondition_checks += sum(
+                1 for item in action_observations if item.get("postcondition")
+            )
+        return observations
+
+    def execute_verification_action(self, candidate, action, allow_postcondition=True):
+        verification = candidate.verification or {}
+        kind = action.get("kind") or verification.get("kind")
+        source_flow = candidate.runtime_source_flow or candidate.source_flow
+        if kind == "strip_auth":
+            observations = [self.replay(
+                source_flow,
+                self.strip_auth_headers(source_flow.get("request_headers") or {}),
+                "去除认证信息后重放原始请求",
+            )]
+        if kind == "swap_auth":
+            related = action.get("related_flow") or {}
+            observations = [self.replay(
+                source_flow,
+                self.swap_auth_headers(
+                    source_flow.get("request_headers") or {},
+                    related.get("request_headers") or {},
+                ),
+                f"使用其他身份认证信息访问原资源 #{action.get('identity_index') or 1}",
+                related_flow=related,
+            )]
+        if kind == "same_auth_replay":
+            observations = [self.replay(
+                source_flow,
+                source_flow.get("request_headers") or {},
+                "使用原认证信息重放包含敏感业务字段的请求",
+            )]
+        if kind == "mutate_param":
+            observation = self.replay_with_mutation(
+                source_flow,
+                source_flow.get("request_headers") or {},
+                candidate.resource or verification.get("parameter") or {},
+                action.get("new_value"),
+            )
+            observations = [observation]
+            if allow_postcondition and self.should_postcondition_readback(
+                source_flow,
+                observation,
+                0,
+            ):
                 observations.append(
-                    self.replay_with_mutation(
+                    self.postcondition_readback_request(
                         source_flow,
                         source_flow.get("request_headers") or {},
-                        candidate.resource or verification.get("parameter") or {},
-                        value,
+                        observation,
                     )
                 )
-            return observations
-        return []
+        if kind not in ("strip_auth", "swap_auth", "same_auth_replay", "mutate_param"):
+            return []
+
+        for observation in observations:
+            observation["action_id"] = action.get("id") or ""
+            observation["verification_kind"] = kind
+        return observations
 
     def replay_with_mutation(self, flow, headers, parameter, new_value):
         mutated_flow, mutation = self.mutated_flow(flow, parameter, new_value)
@@ -140,6 +208,66 @@ class LogicHttpExecutor:
         result["mutation"] = mutation
         return result
 
+    def should_postcondition_readback(self, flow, observation, checks_sent):
+        if not self.postcondition_readback:
+            return False
+        if checks_sent >= self.max_postcondition_checks:
+            return False
+        if "GET" not in self.allowed_methods:
+            return False
+        if (flow.get("method") or "").upper() in ("GET", "HEAD"):
+            return False
+        if observation.get("blocked") or observation.get("error"):
+            return False
+        status = int(observation.get("status_code") or 0)
+        return 200 <= status < 400
+
+    def postcondition_readback_request(self, flow, headers, parent_observation):
+        readback_url = self.postcondition_url(flow.get("url") or "", parent_observation)
+        if not readback_url:
+            return {
+                "purpose": "写操作后只读复查资源状态",
+                "ok": False,
+                "blocked": True,
+                "error": "no same-origin readback URL available",
+                "method": "GET",
+                "url": "",
+                "postcondition": True,
+                "parent_mutation": parent_observation.get("mutation") or {},
+            }
+
+        readback_flow = dict(flow or {})
+        readback_flow["method"] = "GET"
+        readback_flow["url"] = readback_url
+        readback_flow["request_body_text"] = ""
+        observation = self.replay(
+            readback_flow,
+            headers,
+            "写操作后只读复查资源状态",
+        )
+        observation["postcondition"] = True
+        observation["parent_mutation"] = parent_observation.get("mutation") or {}
+        observation["parent_status_code"] = parent_observation.get("status_code")
+        return observation
+
+    def postcondition_url(self, base_url, observation):
+        location = observation.get("location") or ""
+        if location:
+            candidate = urljoin(base_url, location)
+            if self.same_origin(base_url, candidate):
+                return candidate
+        return base_url if self.same_origin(base_url, base_url) else ""
+
+    def same_origin(self, left, right):
+        left_parts = urlsplit(left or "")
+        right_parts = urlsplit(right or "")
+        return bool(
+            left_parts.scheme
+            and left_parts.netloc
+            and left_parts.scheme == right_parts.scheme
+            and left_parts.netloc == right_parts.netloc
+        )
+
     def mutated_flow(self, flow, parameter, new_value):
         parameter = parameter or {}
         place = (parameter.get("place") or parameter.get("source") or "").lower()
@@ -154,6 +282,8 @@ class LogicHttpExecutor:
             "old_value": parameter.get("value") or parameter.get("value_preview") or "",
             "new_value": str(new_value),
         }
+        if parameter.get("json_path") is not None:
+            mutation["json_path"] = parameter.get("json_path")
 
         if place == "query":
             mutated["url"] = self.replace_url_query_value(
@@ -416,15 +546,22 @@ class LogicHttpExecutor:
             "request": self.render_request(method, flow.get("url") or "", safe_headers, data),
             "response": self.render_response(status_code, response_headers, response_body),
             "response_excerpt": trim_text(response_body, 5000),
+            "location": header_value(response_headers, "location"),
             "baseline_status_code": flow.get("status_code"),
             "baseline_response_excerpt": trim_text(flow.get("response_body_text") or "", 3000),
             "source_flow_id": flow.get("id"),
             "related_flow_id": (related_flow or {}).get("id"),
             "related_auth_fingerprint": (related_flow or {}).get("auth_fingerprint"),
+            "alternate_baseline_response_excerpt": trim_text(
+                (related_flow or {}).get("response_body_text") or "",
+                3000,
+            ),
             "auth_header_present": bool(
                 header_value(safe_headers, "authorization")
                 or header_value(safe_headers, "cookie")
                 or header_value(safe_headers, "x-api-key")
+                or header_value(safe_headers, "x-auth-token")
+                or header_value(safe_headers, "x-csrf-token")
             ),
         }
 
