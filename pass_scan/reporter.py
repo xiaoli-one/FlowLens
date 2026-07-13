@@ -7,6 +7,7 @@ import html
 import hashlib
 import json
 import os
+import re
 import threading
 from collections import Counter
 from urllib.parse import urlsplit
@@ -1404,31 +1405,286 @@ def render_logic_section(results):
     """
 
 
-def render_verification_payloads(payloads):
-    if not payloads:
-        return '<p class="muted">暂无结构化 payload。</p>'
+def coerce_string_list(value):
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if item is not None and str(item)]
+    return [str(value)]
 
-    rows = []
-    for payload in payloads:
-        if isinstance(payload, dict):
-            step = payload.get("step") or payload.get("name") or "-"
-            value = payload.get("payload") or payload.get("value") or ""
-            purpose = payload.get("purpose") or payload.get("result") or ""
-        else:
-            step = "-"
-            value = payload
-            purpose = ""
-        purpose_html = f'<p class="muted">{escape(purpose)}</p>' if purpose else ""
-        rows.append(
-            "<tr>"
-            f"<th>{escape(step)}</th>"
-            f"<td><code>{escape(value)}</code>{purpose_html}</td>"
-            "</tr>"
-        )
+
+def normalize_verification_payload(payload, index):
+    if isinstance(payload, dict):
+        raw_step = payload.get("step") or payload.get("name") or ""
+        request_ids = []
+        for key in (
+            "successful_request_ids",
+            "request_ids",
+            "action_ids",
+            "request_id",
+            "action_id",
+        ):
+            request_ids.extend(coerce_string_list(payload.get(key)))
+        return {
+            "step": raw_step or f"Payload {index}",
+            "has_explicit_step": bool(raw_step),
+            "payload": payload.get("payload") or payload.get("value") or "",
+            "purpose": payload.get("purpose") or "",
+            "result": payload.get("result") or "",
+            "request_ids": request_ids,
+        }
+
+    return {
+        "step": f"Payload {index}",
+        "has_explicit_step": False,
+        "payload": payload,
+        "purpose": "",
+        "result": "",
+        "request_ids": [],
+    }
+
+
+def verification_request_key(request_result, index):
+    action_id = str(request_result.get("action_id") or "")
+    if action_id:
+        return f"id:{action_id}"
+    return f"index:{index}"
+
+
+def verification_request_matches_payload(payload, request_result):
+    action_id = str(request_result.get("action_id") or "")
+    if action_id and action_id in set(payload.get("request_ids") or []):
+        return True
+
+    payload_text = " ".join(
+        str(payload.get(key) or "")
+        for key in ("step", "purpose", "result")
+    )
+    if action_id and action_id in payload_text:
+        return True
+
+    payload_value = str(payload.get("payload") or "").strip()
+    request_payload = str(request_result.get("payload") or "").strip()
+    if payload_value and request_payload and payload_value == request_payload:
+        return True
+
+    if payload.get("has_explicit_step"):
+        step = str(payload.get("step") or "").strip().lower()
+        chain_step = str(request_result.get("chain_step") or "").strip().lower()
+        purpose = str(request_result.get("purpose") or "").strip().lower()
+        if step and (
+            step in (chain_step, purpose)
+            or (chain_step and (step in chain_step or chain_step in step))
+            or (purpose and (step in purpose or purpose in step))
+        ):
+            return True
+
+    return False
+
+
+def render_verification_request_packet(request_result, title, proof_id):
+    proof = {
+        "request": request_result.get("request", ""),
+        "response": request_result.get("response", ""),
+    }
     return f"""
-    <table class="evidence payload-table">
-      <tbody>{''.join(rows)}</tbody>
-    </table>
+    <section class="payload-packet">
+      {render_proof(title, proof, proof_id)}
+    </section>
+    """
+
+
+def strip_response_headers(response_text):
+    if not response_text:
+        return ""
+    for separator in ("\r\n\r\n", "\n\n"):
+        if separator in response_text:
+            return response_text.split(separator, 1)[1]
+    return response_text
+
+
+def plain_text_snippet(value, max_chars=240):
+    text = html.unescape(str(value or ""))
+    text = re.sub(r"<[^>]+>", " ", text)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    text = "；".join(lines)
+    text = re.sub(r"\s+", " ", text).strip("； ")
+    return truncate_report_text(text, max_chars)
+
+
+def truncate_report_text(text, max_chars):
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1].rstrip() + "…"
+
+
+def first_response_body_match(body, patterns):
+    for pattern in patterns:
+        match = re.search(pattern, body, re.S | re.I | re.M)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def generic_payload_result(result):
+    text = str(result or "").strip()
+    if not text:
+        return True
+    generic_markers = (
+        "请求成功",
+        "响应状态",
+        "返回 200",
+        "返回 HTTP 200",
+        "HTTP 200",
+        "未被阻断",
+        "未被拦截",
+        "响应摘要未",
+        "响应片段未",
+        "成功返回 200",
+    )
+    specific_markers = (
+        "读到",
+        "读取到",
+        "内容为",
+        "回显",
+        "触发约",
+        "命中 OOB",
+        "PASS_SCAN",
+        "PRETTY_NAME",
+        "Uid:",
+        "www-data",
+    )
+    return any(marker in text for marker in generic_markers) and not any(
+        marker in text for marker in specific_markers
+    ) and "未观察到" not in text
+
+
+def infer_payload_execution_result(payload, matched_requests):
+    payload_text = " ".join(
+        str(payload.get(key) or "")
+        for key in ("step", "payload", "purpose")
+    ).lower()
+    for _key, _request_index, request_result in matched_requests or []:
+        response = request_result.get("response") or ""
+        body = strip_response_headers(response)
+
+        if request_result.get("oob_hit") is True:
+            interactions = request_result.get("oob_interactions") or []
+            return "命中 OOB 回连：" + plain_text_snippet(json.dumps(interactions, ensure_ascii=False), 220)
+
+        elapsed_ms = request_result.get("elapsed_ms")
+        if "sleep" in payload_text and isinstance(elapsed_ms, (int, float)) and elapsed_ms >= 1000:
+            return f"响应耗时 {elapsed_ms}ms，触发延时条件。"
+
+        pre_text = first_response_body_match(body, [r"<pre[^>]*>(.*?)</pre>"])
+        if pre_text:
+            snippet = plain_text_snippet(pre_text, 260)
+            if snippet:
+                return "响应回显：" + snippet
+
+        passwd_text = first_response_body_match(body, [r"(root:x:0:0:.*?)(?:\n\s*\n|<|\r\n\s*\r\n)"])
+        if passwd_text:
+            return "读到 /etc/passwd 片段：" + plain_text_snippet(passwd_text, 260)
+
+        os_release_text = first_response_body_match(
+            body,
+            [r"(^NAME=[\s\S]*?^UBUNTU_CODENAME=[^\r\n<]+)"],
+        )
+        if os_release_text:
+            return "读到系统版本信息：" + plain_text_snippet(os_release_text, 260)
+
+        proc_status_text = first_response_body_match(body, [r"(Name:\s*[^\n\r]+[\s\S]*?Uid:\s*[^\n\r]+)"])
+        if proc_status_text:
+            return "读到进程状态信息：" + plain_text_snippet(proc_status_text, 260)
+
+    return ""
+
+
+def payload_result_text(payload, matched_requests):
+    purpose = str(payload.get("purpose") or "").strip().rstrip("。；;，, ")
+    result = str(payload.get("result") or "").strip().rstrip("。；;，, ")
+    inferred_result = ""
+    if generic_payload_result(result):
+        inferred_result = infer_payload_execution_result(payload, matched_requests)
+    if inferred_result:
+        result = inferred_result.rstrip("。；;，, ")
+
+    pieces = []
+    if purpose:
+        pieces.append(f"目的：{purpose}")
+    if result:
+        pieces.append(f"结果：{result}")
+    return "；".join(pieces) or "暂无结构化 payload 结果。"
+
+
+def render_verification_payload_bundle(result, item_id):
+    payloads = [
+        normalize_verification_payload(payload, index)
+        for index, payload in enumerate(result.get("payloads") or [], start=1)
+    ]
+    requests = result.get("requests", []) or []
+    request_pairs = [
+        (verification_request_key(request_result, index), index, request_result)
+        for index, request_result in enumerate(requests, start=1)
+    ]
+
+    shown_request_keys = set()
+    payload_cards = []
+    for payload_index, payload in enumerate(payloads, start=1):
+        matches = [
+            (key, request_index, request_result)
+            for key, request_index, request_result in request_pairs
+            if key not in shown_request_keys and verification_request_matches_payload(payload, request_result)
+        ]
+        if not matches and len(payloads) == 1:
+            matches = [
+                (key, request_index, request_result)
+                for key, request_index, request_result in request_pairs
+                if key not in shown_request_keys
+            ]
+        if not matches:
+            continue
+
+        packet_html = []
+        for match_index, (key, request_index, request_result) in enumerate(matches, start=1):
+            shown_request_keys.add(key)
+            title = (
+                request_result.get("chain_step")
+                or request_result.get("purpose")
+                or "验证数据包"
+            )
+            packet_html.append(
+                render_verification_request_packet(
+                    request_result,
+                    title,
+                    f"{item_id}-payload-{payload_index}-success-{match_index}",
+                )
+            )
+
+        result_html = f"<p><strong>Payload 结果：</strong>{escape(payload_result_text(payload, matches))}</p>"
+        payload_cards.append(
+            f"""
+            <section class="verification-payload-card">
+              {''.join(packet_html)}
+              <div class="verification-payload-text">
+                {render_pre(payload.get("payload") or "-", f"{item_id}-payload-{payload_index}-value")}
+              </div>
+              <div class="verification-payload-notes">
+                {result_html}
+              </div>
+            </section>
+            """
+        )
+
+    if not payload_cards:
+        payload_cards.append('<p class="muted">暂无可关联到 payload 的主动验证数据包。</p>')
+
+    return f"""
+    <section class="verification-payload-bundle">
+      {''.join(payload_cards)}
+    </section>
     """
 
 
@@ -1442,50 +1698,6 @@ def render_verification_result(result, index):
     match_key = fallback_finding_match_key(source)
     param = f"{source.get('param_place', '')}.{source.get('param_name', '')}"
     requests = result.get("requests", []) or []
-    successful_request_ids = set(result.get("successful_request_ids") or [])
-    successful_requests = result.get("successful_requests") or [
-        request_result
-        for request_result in requests
-        if request_result.get("action_id") in successful_request_ids
-    ]
-
-    success_html = []
-    for request_index, request_result in enumerate(successful_requests, start=1):
-        title = (
-            request_result.get("chain_step")
-            or request_result.get("purpose")
-            or f"成功利用数据包 {request_index}"
-        )
-        proof = {
-            "request": request_result.get("request", ""),
-            "response": request_result.get("response", ""),
-        }
-        success_html.append(
-            render_proof(
-                f"成功利用数据包 {request_index}: {title}",
-                proof,
-                f"{item_id}-success-{request_index}",
-            )
-        )
-
-    request_html = []
-    for request_index, request_result in enumerate(requests, start=1):
-        title = (
-            request_result.get("chain_step")
-            or request_result.get("purpose")
-            or f"主动验证请求 {request_index}"
-        )
-        proof = {
-            "request": request_result.get("request", ""),
-            "response": request_result.get("response", ""),
-        }
-        request_html.append(
-            render_proof(
-                title,
-                proof,
-                f"{item_id}-request-{request_index}",
-            )
-        )
 
     return f"""
     <details class="verification" id="{escape(item_id)}" data-status="{escape(status)}" data-type="{escape(vuln_type)}" data-host="{escape(verification_host_for(result))}" data-finding-key="{escape(finding_key)}" data-match-key="{escape(match_key)}">
@@ -1525,23 +1737,11 @@ def render_verification_result(result, index):
         <h3>安全影响</h3>
         <p class="verification-summary">{escape(result.get('impact') or '-')}</p>
 
-        <h3>完整利用链</h3>
-        {render_list(result.get("exploit_chain") or [])}
-
-        <h3>Payload</h3>
-        {render_verification_payloads(result.get("payloads") or [])}
-
-        <h3>成功利用/组合成功数据包</h3>
-        {''.join(success_html) or '<p class="muted">Agent 未标记成功数据包。</p>'}
-
-        <h3>复现步骤</h3>
-        {render_list(result.get("reproduction") or [])}
+        <h3>成功利用/组合利用payload</h3>
+        {render_verification_payload_bundle(result, item_id)}
 
         <h3>安全边界说明</h3>
         <p class="verification-summary">{escape(result.get('safety_notes') or '-')}</p>
-
-        <h3>全部主动验证请求</h3>
-        {''.join(request_html) or '<p class="muted">暂无主动请求记录。</p>'}
       </div>
     </details>
     """
@@ -1605,7 +1805,7 @@ def render_verification_section(results):
     </section>
 
     <section class="toolbar" aria-label="验证筛选">
-      <input id="verifySearch" type="search" placeholder="搜索 URL、payload、利用链、验证结论">
+      <input id="verifySearch" type="search" placeholder="搜索 URL、payload、验证结论">
       <select id="verifyStatusFilter">
         {render_verify_status_options(summary["statuses"])}
       </select>
@@ -2277,6 +2477,42 @@ def write_html_report(
       color: var(--text);
       line-height: 1.7;
       overflow-wrap: anywhere;
+    }}
+    .verification-payload-bundle {{
+      display: grid;
+      gap: 12px;
+    }}
+    .verification-payload-card {{
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+    }}
+    .verification-payload-text pre {{
+      min-height: 0;
+      max-height: 260px;
+      background: #f8fafc;
+    }}
+    .verification-payload-notes {{
+      display: grid;
+      gap: 6px;
+      margin: 8px 0 0;
+      color: var(--text);
+      font-size: 13px;
+      line-height: 1.6;
+    }}
+    .verification-payload-notes p {{
+      margin: 0;
+    }}
+    .payload-packet {{
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px dashed var(--line);
+    }}
+    .verification-payload-card .payload-packet:first-child {{
+      margin-top: 0;
+      padding-top: 0;
+      border-top: 0;
     }}
     .payload-table code {{
       display: block;
