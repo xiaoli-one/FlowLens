@@ -97,7 +97,23 @@ def build_payloads_from_rules(value, suffix_rule, template_rule):
     templates = rule_value(template_rule, [])
     payloads = [value + suffix for suffix in suffixes]
     payloads.extend(render_template(template, value) for template in templates)
-    return payloads
+    return dedupe_preserving_order(payloads)
+
+
+def dedupe_preserving_order(items, key=None):
+    """按最终 payload 内容去重，同时保持规则里的优先级顺序。"""
+    result = []
+    seen = set()
+    key = key or (lambda item: item)
+
+    for item in items:
+        item_key = key(item)
+        if item_key in seen:
+            continue
+        seen.add(item_key)
+        result.append(item)
+
+    return result
 
 
 def build_error_payloads(value):
@@ -129,7 +145,10 @@ def build_boolean_payload_groups(value):
                 "false": render_template(get_group_value(group, "false"), value),
             }
         )
-    return groups
+    return dedupe_preserving_order(
+        groups,
+        key=lambda group: (group["true"], group["false"]),
+    )
 
 
 def build_header_boolean_payload_groups(value):
@@ -143,7 +162,10 @@ def build_header_boolean_payload_groups(value):
                 "false": render_template(get_group_value(group, "false"), value),
             }
         )
-    return groups
+    return dedupe_preserving_order(
+        groups,
+        key=lambda group: (group["true"], group["false"]),
+    )
 
 
 def build_time_payload_groups(value):
@@ -158,7 +180,10 @@ def build_time_payload_groups(value):
                 "delay": render_template(group["delay"], value),
             }
         )
-    return groups
+    return dedupe_preserving_order(
+        groups,
+        key=lambda group: (group["control"], group["delay"]),
+    )
 
 
 def build_header_time_payload_groups(value):
@@ -173,7 +198,10 @@ def build_header_time_payload_groups(value):
                 "delay": render_template(group["delay"], value),
             }
         )
-    return groups
+    return dedupe_preserving_order(
+        groups,
+        key=lambda group: (group["control"], group["delay"]),
+    )
 
 
 def build_inline_payload_groups(value):
@@ -196,14 +224,15 @@ def build_inline_payload_groups(value):
             }
         )
 
-    return groups
+    return dedupe_preserving_order(groups, key=lambda group: group["payload"])
 
 
-def build_union_payload_groups(value):
+def build_union_payload_groups(value, exhaustive=False):
     """生成 UNION query 注入 payload。
 
-    UNION 检测需要猜列数。这里根据 YAML 的 max_columns 生成：
-    UNION ALL SELECT NULL,'MARKER',NULL-- 
+    UNION 检测需要猜列数。默认对每个闭合方式/列数组合选择一个 marker
+    位置，确认场景覆盖；exhaustive=True 时枚举所有 marker 位置：
+    UNION SELECT NULL,'MARKER',NULL-- 
     只要响应里出现 MARKER，就说明 UNION 查询结果进入了页面。
     """
     union_rules = rule_value("union_query", {})
@@ -211,9 +240,19 @@ def build_union_payload_groups(value):
     max_columns = int(union_rules.get("max_columns", 6))
     groups = []
 
-    for template_rule in union_rules.get("payload_templates", []):
+    for template_index, template_rule in enumerate(
+        union_rules.get("payload_templates", [])
+    ):
         for column_count in range(1, max_columns + 1):
-            for marker_index in range(column_count):
+            # 默认模式的目标是确认“存在 SQL 注入”，不是完整枚举可回显列。
+            # 每种闭合方式、每个列数保留一个 marker 位置，并在不同闭合方式间
+            # 轮换位置，形成覆盖集。--full-payload-scan 再枚举所有位置。
+            if exhaustive:
+                marker_indexes = range(column_count)
+            else:
+                marker_indexes = (template_index % column_count,)
+
+            for marker_index in marker_indexes:
                 columns = ["NULL"] * column_count
                 columns[marker_index] = f"'{marker}'"
                 payload = render_template(
@@ -234,7 +273,7 @@ def build_union_payload_groups(value):
                     }
                 )
 
-    return groups
+    return dedupe_preserving_order(groups, key=lambda group: group["payload"])
 
 
 def build_stacked_payload_groups(value):
@@ -254,7 +293,10 @@ def build_stacked_payload_groups(value):
             }
         )
 
-    return groups
+    return dedupe_preserving_order(
+        groups,
+        key=lambda group: (group["control"], group["delay"]),
+    )
 
 
 def build_header_stacked_payload_groups(value):
@@ -270,7 +312,10 @@ def build_header_stacked_payload_groups(value):
             }
         )
 
-    return groups
+    return dedupe_preserving_order(
+        groups,
+        key=lambda group: (group["control"], group["delay"]),
+    )
 
 
 @lru_cache(maxsize=1)
