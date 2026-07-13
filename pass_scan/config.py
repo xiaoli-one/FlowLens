@@ -147,15 +147,12 @@ DEFAULT_CONFIG = {
     "plugins": {
         "sql_injection": {
             "enabled": True,
-            "deep_tamper": True,
+            "deep_tamper": False,
             "deep_tamper_max_profiles": 4,
             "deep_tamper_methods": [
                 "error_based",
                 "boolean_based",
                 "inline_query",
-                "union_based",
-                "stacked_query",
-                "time_based",
             ],
         },
         "fingerprint": {
