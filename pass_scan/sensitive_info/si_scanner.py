@@ -457,7 +457,6 @@ class SensitiveInfoScanner:
         written = []
         for finding in findings:
             if self.write_finding_once(finding):
-                print_finding_once(self, finding)
                 written.append(finding)
 
         return written
