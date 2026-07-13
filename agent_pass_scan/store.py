@@ -569,10 +569,12 @@ class FlowStore:
         with self.lock:
             with self.connect() as conn:
                 row = conn.execute(
-                    "SELECT candidate_key FROM analyzed_candidates WHERE candidate_key = ?",
+                    "SELECT status FROM analyzed_candidates WHERE candidate_key = ?",
                     (candidate_key,),
                 ).fetchone()
-                return bool(row)
+                if not row:
+                    return False
+                return (row["status"] or "") not in ("started", "error")
 
     def load_finding(self, finding_key):
         with self.lock:
