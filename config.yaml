@@ -204,13 +204,12 @@ plugins:
     # worker_count: 3
     # queue_size: 200
 
-    # 深度 tamper 检测：
-    # 普通 payload 没命中、也没有明显 WAF 拦截时，再尝试少量 tamper。
-    # 用来处理后端普通过滤、关键字删除、空格过滤、引号转义等情况。
-    deep_tamper: true
+    # 深度 tamper 检测。默认模式只跑覆盖集；需要主动追加绕过变形时使用
+    # 现有 --full-payload-scan，或在这里手动开启。WAF 明确拦截时仍会按需 tamper。
+    deep_tamper: false
 
-    # 非 WAF 场景下，每个 payload 最多尝试多少个 tamper profile。
-    # WAF 场景仍然使用 rules.yaml 里的 max_tampered_payloads_per_probe。
+    # 手动开启 deep_tamper 时，每个 payload 最多尝试多少个 profile。
+    # --full-payload-scan 使用代码内受控的扩展上限；WAF 场景使用 rules.yaml 上限。
     deep_tamper_max_profiles: 4
 
     # 哪些检测类型允许 deep tamper。
