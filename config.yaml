@@ -185,7 +185,8 @@ verification:
   llm_timeout_seconds: 60
   llm_max_tokens: 4096
   oob_wait_seconds: 30
-  max_response_body_bytes: 262144
+  # 0 表示主动验证报告保存完整响应包；设置为正整数时按字节限制读取。
+  max_response_body_bytes: 0
   observation_chars: 12000
   prompt_chars: 50000
   allowed_methods:
@@ -581,8 +582,24 @@ plugins:
     max_response_body_bytes: 262144
     prompt_chars: 50000
     max_flows_per_endpoint: 30
-    max_candidates_per_endpoint: 6
+    # endpoint 会处理所有高信号假设；这个值只作为失控保护，不是正常停止条件。
+    max_candidates_per_endpoint: 12
+    max_http_requests_per_endpoint: 18
+
+    # 候选不按 detector 固定顺序抢满总预算，而是每类先取少量高信号候选再统一排序。
+    max_candidates_per_detector: 2
     max_alternate_identities_per_candidate: 3
+
+    # 单个候选按证据闭环提前结束；以下配置只是防死循环和控制副作用的硬预算。
+    max_agent_steps: 10
+    max_http_requests_per_candidate: 6
+    max_write_requests_per_candidate: 1
+    max_investigation_seconds: 90
+
+    # 对流程/敏感字段篡改类请求，主动请求成功后最多做几次同源 GET 只读复查，
+    # 用于补充“状态/字段是否真的生效”的证据。
+    postcondition_readback: true
+    max_postcondition_checks_per_candidate: 2
 
     # 逻辑漏洞内置差分验证会按配置重放请求；当前默认包含写方法，允许做破坏性验证。
     active_verification_methods:
