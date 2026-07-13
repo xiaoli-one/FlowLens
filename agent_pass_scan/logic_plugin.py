@@ -7,7 +7,9 @@ from agent_pass_scan.exploit_chain import (
     chain_status_from_finding_status,
     exploit_chain_complete,
 )
+from agent_pass_scan.evidence import build_evidence_profile
 from agent_pass_scan.http_executor import LogicHttpExecutor
+from agent_pass_scan.investigation import InvestigationEngine
 from agent_pass_scan.llm_client import LogicLLMClient
 from agent_pass_scan.models import LogicTask
 from agent_pass_scan.finding_merge import (
@@ -46,9 +48,14 @@ class LogicAgentScanner:
         self.store = FlowStore(self.sqlite_file)
         self.llm = LogicLLMClient(self.config)
         self.executor = LogicHttpExecutor(self.config)
+        self.investigator = InvestigationEngine(self.config, self.executor)
         self.detectors = default_detectors(self.config)
         self.max_flows_per_endpoint = int(self.config.get("max_flows_per_endpoint", 30))
-        self.max_candidates_per_endpoint = int(self.config.get("max_candidates_per_endpoint", 6))
+        self.max_candidates_per_endpoint = int(self.config.get("max_candidates_per_endpoint", 12))
+        self.max_candidates_per_detector = int(self.config.get("max_candidates_per_detector", 2))
+        self.max_http_requests_per_endpoint = int(
+            self.config.get("max_http_requests_per_endpoint", 18)
+        )
         self.prompt_chars = int(self.config.get("prompt_chars", 50000))
         self.ready_notice_printed = False
         self.enqueue_log_lock = threading.Lock()
@@ -115,21 +122,28 @@ class LogicAgentScanner:
         if not bundle:
             return
 
-        candidates = []
-        for detector in self.detectors:
-            candidates.extend(detector.build_candidates(bundle))
-            if len(candidates) >= self.max_candidates_per_endpoint:
-                break
+        candidates = self.build_candidate_queue(bundle)
 
-        for candidate in candidates[: self.max_candidates_per_endpoint]:
+        analyzed_count = 0
+        endpoint_http_requests = 0
+        for candidate in candidates:
+            if analyzed_count >= self.max_candidates_per_endpoint:
+                break
+            if endpoint_http_requests >= self.max_http_requests_per_endpoint:
+                break
             if self.finding_already_confirmed(candidate):
                 self.store.mark_candidate(candidate.key, "skipped_confirmed")
                 continue
             if self.store.candidate_seen(candidate.key):
                 continue
+            analyzed_count += 1
             self.store.mark_candidate(candidate.key, "started")
             try:
-                finding = self.analyze_candidate(candidate, bundle)
+                finding = self.analyze_candidate(
+                    candidate,
+                    bundle,
+                    request_budget=self.max_http_requests_per_endpoint - endpoint_http_requests,
+                )
             except Exception as error:
                 self.store.mark_candidate(candidate.key, "error")
                 print(
@@ -138,33 +152,166 @@ class LogicAgentScanner:
                 )
                 continue
 
+            endpoint_http_requests += int(
+                ((finding.get("investigation") or {}).get("budget") or {}).get(
+                    "used_http_requests",
+                    0,
+                )
+            )
             status = finding.get("status", "")
             self.store.mark_candidate(candidate.key, status or "done")
             if status in ("confirmed", "likely", "needs_manual_review"):
                 self.emit_finding(finding)
 
-    def analyze_candidate(self, candidate, bundle):
-        observations = self.executor.execute_candidate_verification(candidate)
+    def analyze_candidate(self, candidate, bundle, request_budget=None):
+        investigation = self.investigator.investigate(
+            candidate,
+            request_budget=request_budget,
+        )
+        observations = investigation.get("observations") or []
+        evidence_profile = investigation.get("evidence_profile") or build_evidence_profile(
+            candidate,
+            observations,
+        )
+        investigation_summary = {
+            key: value
+            for key, value in investigation.items()
+            if key not in ("observations", "evidence_profile")
+        }
         model_context = {
             "sqlite_file": self.sqlite_file,
             "report_policy": "逻辑漏洞单独进入 report.html 的逻辑漏洞标签页。",
             "endpoint_stats": bundle.get("stats") or {},
             "identity_memory": bundle.get("identity_memory") or {},
+            "deterministic_evidence_profile": evidence_profile,
+            "investigation": investigation_summary,
         }
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": trim_text(
-                    build_candidate_prompt(candidate, observations, model_context),
-                    self.prompt_chars,
-                ),
-            },
-        ]
-        decision = self.llm.complete_json(messages)
-        return self.build_finding(candidate, observations, decision)
+        if evidence_profile.get("supports_rejected"):
+            decision = {
+                "status": "false_positive",
+                "confidence": "high",
+                "type": candidate.vuln_type,
+                "severity": "info",
+                "title": candidate.title,
+                "summary": "主动差分验证得到明确反证，本候选结束为误报。",
+                "impact": "",
+                "evidence": evidence_profile.get("rejection_reasons") or [],
+                "verified": True,
+                "safety_notes": "由确定性反证直接结束，未继续调用 LLM。",
+            }
+        else:
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": trim_text(
+                        build_candidate_prompt(candidate, observations, model_context),
+                        self.prompt_chars,
+                    ),
+                },
+            ]
+            decision = self.llm.complete_json(messages)
+        decision = self.apply_evidence_guardrails(decision, evidence_profile)
+        return self.build_finding(
+            candidate,
+            observations,
+            decision,
+            evidence_profile,
+            investigation_summary,
+        )
 
-    def build_finding(self, candidate, observations, decision):
+    def build_candidate_queue(self, bundle):
+        candidates = []
+        for detector in self.detectors:
+            detector_candidates = detector.build_candidates(bundle)
+            candidates.extend(detector_candidates[: self.max_candidates_per_detector])
+        candidates.sort(key=self.candidate_priority, reverse=True)
+        return candidates
+
+    def candidate_priority(self, candidate):
+        verification_kind = (candidate.verification or {}).get("kind") or "passive_only"
+        kind_score = {
+            "swap_auth": 50,
+            "strip_auth": 45,
+            "mutate_param": 40,
+            "same_auth_replay": 30,
+            "passive_only": 5,
+        }.get(verification_kind, 0)
+        source_flow = candidate.runtime_source_flow or candidate.source_flow or {}
+        method = (source_flow.get("method") or "").upper()
+        status_code = int(source_flow.get("status_code") or 0)
+        resource = candidate.resource or {}
+        return (
+            kind_score,
+            1 if 200 <= status_code < 400 else 0,
+            min(len(candidate.runtime_related_flows or candidate.related_flows or []), 5),
+            1 if resource.get("value") else 0,
+            1 if resource.get("semantic_type") in ("tenant", "owner", "role", "workflow_state", "business_value") else 0,
+            1 if method in ("POST", "PUT", "PATCH", "DELETE") else 0,
+            len(candidate.evidence or []),
+        )
+
+    def apply_evidence_guardrails(self, decision, evidence_profile):
+        guarded = dict(decision or {})
+        status = str(guarded.get("status") or "needs_manual_review").strip().lower()
+
+        if evidence_profile.get("supports_rejected"):
+            guarded["status"] = "false_positive"
+            guarded["confidence"] = "high"
+            guarded["verified"] = True
+            rejection_reasons = evidence_profile.get("rejection_reasons") or []
+            downgrade_note = "确定性反证护栏：主动验证得到明确拒绝或未生效证据，结束为 false_positive。"
+            evidence = guarded.get("evidence") or []
+            if isinstance(evidence, str):
+                evidence = [evidence]
+            evidence.append(downgrade_note)
+            evidence.extend([f"反证：{item}" for item in rejection_reasons[:4]])
+            guarded["evidence"] = evidence
+            guarded["safety_notes"] = (
+                f"{guarded.get('safety_notes') or ''} {downgrade_note}"
+            ).strip()
+            return guarded
+
+        if status not in ("confirmed", "likely"):
+            return guarded
+
+        if status == "confirmed" and evidence_profile.get("supports_confirmed"):
+            guarded["verified"] = True
+            return guarded
+        if status == "likely" and evidence_profile.get("supports_likely"):
+            return guarded
+
+        missing = evidence_profile.get("missing_evidence") or []
+        if evidence_profile.get("supports_likely"):
+            guarded["status"] = "likely"
+            if str(guarded.get("confidence") or "").lower() == "high":
+                guarded["confidence"] = "medium"
+            downgrade_note = "确定性证据护栏：证据不足以 confirmed，降级为 likely。"
+        else:
+            guarded["status"] = "needs_manual_review"
+            guarded["confidence"] = "low"
+            downgrade_note = "确定性证据护栏：主动差分证据未闭环，降级为 needs_manual_review。"
+
+        evidence = guarded.get("evidence") or []
+        if isinstance(evidence, str):
+            evidence = [evidence]
+        evidence.append(downgrade_note)
+        evidence.extend([f"缺口：{item}" for item in missing[:4]])
+        guarded["evidence"] = evidence
+
+        safety_notes = guarded.get("safety_notes") or ""
+        gaps = "；".join(missing[:4])
+        guarded["safety_notes"] = f"{safety_notes} {downgrade_note}{(' 缺口：' + gaps) if gaps else ''}".strip()
+        return guarded
+
+    def build_finding(
+        self,
+        candidate,
+        observations,
+        decision,
+        evidence_profile=None,
+        investigation=None,
+    ):
         now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         status = str(decision.get("status") or "needs_manual_review").strip().lower()
         if status not in ("confirmed", "likely", "needs_manual_review", "false_positive"):
@@ -199,6 +346,8 @@ class LogicAgentScanner:
             "resource": candidate.resource or {},
             "candidate": candidate.to_prompt_dict(),
             "verification_observations": observations,
+            "evidence_profile": evidence_profile or {},
+            "investigation": investigation or {},
             "model": self.llm.model,
             "sqlite_file": self.sqlite_file,
         }
