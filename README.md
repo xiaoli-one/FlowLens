@@ -5,10 +5,10 @@
 
 `FlowLens` 是一个基于 `mitmproxy/mitmdump` 的被动流量安全检测工具。它通过本地代理接收浏览器、BurpSuite 或其他客户端转发的 HTTP/HTTPS 流量，记录请求与响应，并把符合条件的流量提交给插件后台验证，最终输出 JSONL 结果和静态 HTML 报告。
 
-`FlowLens` 在被动传统被动检测基础上新加两个可选 Agent：
+FlowLens 在被动传统被动检测基础上新加两个可选 Agent：
 
 - **主动漏洞验证 Agent**：由 `vuln_verify` 提供，运行 `--verify` 后会把已发现漏洞交给 LLM 决策下一步非破坏性验证动作，再由本地受控 HTTP 执行器发包，生成可复现的利用链、payload 和成功请求证据。
-- **业务逻辑漏洞 Agent**：由 `agent_pass_scan` 提供，运行 `--logic` 或 `--only-logic` 后会持续索引被动流量，按认证指纹、接口、资源和历史响应建立上下文，对未授权、越权、租户隔离、流程绕过、敏感字段篡改等候选做差分验证，并交给 LLM 输出逻辑漏洞结论。
+- **业务逻辑漏洞 Agent**：由 `agent_pass_scan` 提供，运行 `--scan logic` 后会持续索引被动流量，按认证指纹、接口、资源和历史响应建立上下文，对未授权、越权、租户隔离、流程绕过、敏感字段篡改等候选做差分验证，并交给 LLM 输出逻辑漏洞结论。
 
 > 仅在已授权的资产、靶场或测试环境中使用。本工具会重放请求并注入 payload，部分插件会发起带外探测、上传 canary 文件或写入对象存储 canary 对象。
 
@@ -25,22 +25,22 @@
 
 当前已内置以下检测能力：
 
-| 能力 | 命令行开关 | 说明 |
+| 能力 | `--scan` 名称 | 说明 |
 | --- | --- | --- |
-| SQL 注入 | `--sqli` | 报错、布尔、inline、UNION、stacked、时间盲注，支持 tamper |
-| XSS | `--xss` | 反射/存储统一检测，支持 marker 回扫 |
-| 命令注入 / RCE | `--rce` | 命令回显、时间盲注、OOB 带外确认 |
-| LFI / 任意文件读取 | `--lfi` | 目录遍历、任意文件读取、`php://filter` 源码读取 |
-| SSRF | `--ssrf` | 多协议和绕过变体，基于 OOB 回连确认 |
-| XXE | `--xxe` | 带内文件读取、OOB 外部实体解析 |
-| SSTI | `--ssti` | 算术回显、字符串转换、模板错误指纹 |
-| 开放重定向 / CRLF | `--redir` | 开放重定向、响应头注入 |
-| 敏感信息泄漏 | `--sensitive` | AK/SK、API key、Token、私钥、配置文件、Swagger、Actuator 等 |
-| OSS / 对象存储 | `--oss` | 桶发现、匿名列举、匿名上传/覆盖、AK/SK 泄漏 |
-| 文件上传 | `--upload` | 上传点识别、危险扩展、双扩展、图片马、解析绕过、`.htaccess` 链 |
-| JWT | `--jwt` | `alg=none`、签名绕过、弱 HMAC 密钥、claim 风险 |
-| 指纹识别 | `--fp` | 框架、中间件、CMS、开源应用等 6646 条指纹 |
-| 逻辑漏洞 Agent | `--logic` / `--only-logic` | 基于被动流量索引、语义判断和差分验证检测未授权、越权、租户隔离、流程绕过等 |
+| SQL 注入 | `sqli` | 报错、布尔、inline、UNION、stacked、时间盲注，支持 tamper |
+| XSS | `xss` | 反射/存储统一检测，支持 marker 回扫 |
+| 命令注入 / RCE | `rce` | 命令回显、时间盲注、OOB 带外确认 |
+| LFI / 任意文件读取 | `lfi` | 目录遍历、任意文件读取、`php://filter` 源码读取 |
+| SSRF | `ssrf` | 多协议和绕过变体，基于 OOB 回连确认 |
+| XXE | `xxe` | 带内文件读取、OOB 外部实体解析 |
+| SSTI | `ssti` | 算术回显、字符串转换、模板错误指纹 |
+| 开放重定向 / CRLF | `redir` | 开放重定向、响应头注入 |
+| 敏感信息泄漏 | `sensitive` | AK/SK、API key、Token、私钥、配置文件、Swagger、Actuator 等 |
+| OSS / 对象存储 | `oss` | 桶发现、匿名列举、匿名上传/覆盖、AK/SK 泄漏 |
+| 文件上传 | `upload` | 上传点识别、危险扩展、双扩展、图片马、解析绕过、`.htaccess` 链 |
+| JWT | `jwt` | `alg=none`、签名绕过、弱 HMAC 密钥、claim 风险 |
+| 指纹识别 | `fp` | 框架、语言、中间件、CMS、开源应用、favicon hash |
+| 逻辑漏洞 Agent | `logic` | 基于被动流量索引、语义判断和差分验证检测未授权、越权、租户隔离、流程绕过等 |
 | 主动验证 Agent | `--verify` | 对已发现漏洞做 LLM 辅助验证，生成非破坏性利用链和请求证据 |
 
 
@@ -60,7 +60,7 @@
 | `vuln_verify/` | 主动漏洞验证 Agent |
 | `tools/` | 辅助脚本和 interactsh 客户端 |
 
-更多实现细节见各插件目录下 `TECHNICAL_DOC.md`。
+更多实现细节见 `pass_scan/TECHNICAL_DOC.md`。各插件目录下也包含对应的技术文档。
 
 ## 环境要求
 
@@ -70,8 +70,7 @@
 python3 -m pip install -r requirements.txt
 ```
 
-- 普通扫描不依赖 LLM 配置。只有启用 `--logic/--only-logic` 或 `--verify` 时才需要配置模型服务。
-- 配置 LLM API 在 `.env` 中修改，兼容多种认证协议。
+普通扫描不依赖 LLM 配置。只有在 `--scan` 中包含 `logic` 或启用 `--verify` 时才需要配置模型服务。配置在 `.env` 中修改。
 
 
 ## 快速开始
@@ -79,9 +78,9 @@ python3 -m pip install -r requirements.txt
 启动默认扫描代理：
 
 ```bash
-python3 run.py
+python3 run.py --default
 ```
-默认监听地址为 `127.0.0.1:8081`，流量日志写入 `logs/flows.jsonl`，漏洞报告写入 `report.html`。
+`run.py` 必须指定 `--default` 或 `--scan`。`--default` 会启用全部漏洞检测，包括逻辑漏洞 Agent；默认监听地址为 `127.0.0.1:8081`，流量日志写入 `logs/flows.jsonl`，漏洞报告写入 `report.html`。
 
 检测 HTTPS 站点时，需要安装 mitmproxy CA 证书。代理启动后访问 `http://mitm.it`，按系统或浏览器提示安装证书。
 
@@ -90,25 +89,31 @@ python3 run.py
 只做 SQL 注入、XSS 和命令注入检测：
 
 ```bash
-python3 run.py --sqli --xss --rce
+python3 run.py --scan sqli,xss,rce
 ```
 
-额外启用业务逻辑漏洞 Agent：
+默认扫描时排除 SSRF 和文件上传：
 
 ```bash
-python3 run.py --logic
+python3 run.py --default --exclude ssrf,upload
+```
+
+启用业务逻辑漏洞 Agent，并同时检测 SQL 注入：
+
+```bash
+python3 run.py --scan logic,sqli
 ```
 
 启用 LLM 主动漏洞验证：
 
 ```bash
-python3 run.py --verify
+python3 run.py --default --verify
 ```
 
 默认会忽略目标站自签名或无效 TLS 证书，避免 mitmproxy 对自签名目标返回 502。如需强制校验目标站证书：
 
 ```bash
-python3 run.py --verify-upstream-cert
+python3 run.py --default --verify-upstream-cert
 ```
 
 ## 命令行参数
@@ -121,22 +126,12 @@ python3 run.py --verify-upstream-cert
 | `--report-file` | `report.html` | HTML 报告输出路径 |
 | `--full-payload-scan` | 关闭 | 启用更完整 payload/tamper，并纳入更多 Cookie/Header 检测 |
 | `--verify-upstream-cert` | 关闭 | 校验目标站 TLS 证书 |
-| `--sqli` | 关闭 | 只启用 SQL 注入检测 |
-| `--fp` | 关闭 | 只启用指纹识别 |
-| `--xss` | 关闭 | 只启用 XSS 检测 |
-| `--rce` | 关闭 | 只启用命令注入检测 |
-| `--lfi` | 关闭 | 只启用目录遍历/任意文件读取检测 |
-| `--ssrf` | 关闭 | 只启用 SSRF 检测 |
-| `--xxe` | 关闭 | 只启用 XXE 检测 |
-| `--ssti` | 关闭 | 只启用 SSTI 检测 |
-| `--redir` | 关闭 | 只启用开放重定向/CRLF 检测 |
-| `--sensitive` | 关闭 | 只启用敏感信息泄漏检测 |
-| `--oss` | 关闭 | 只启用对象存储检测 |
-| `--upload` | 关闭 | 只启用文件上传检测 |
-| `--jwt` | 关闭 | 只启用 JWT 检测 |
-| `--logic` | 关闭 | 在常规插件基础上额外启用业务逻辑漏洞 Agent |
-| `--only-logic` | 关闭 | 只启用业务逻辑漏洞 Agent |
+| `--default` | 必选其一 | 启用所有漏洞检测，包括 `logic` |
+| `--scan <名称...>` | 必选其一 | 只启用指定检测；名称可用逗号或空格分隔，例如 `--scan sqli xss,rce` |
+| `--exclude <名称...>` | 空 | 从 `--default` 或 `--scan` 的已选检测中排除指定项 |
 | `--verify` | 关闭 | 启用主动漏洞验证 Agent |
+
+`--default` 与 `--scan` 必须二选一，不能同时使用。`--scan` / `--exclude` 支持的名称为：`sqli`、`fp`、`xss`、`rce`、`lfi`、`ssrf`、`xxe`、`ssti`、`redir`、`sensitive`、`oss`、`upload`、`jwt`、`logic`。也支持对应内部名称，例如 `sql_injection` 和 `command_injection`。
 
 ## 配置
 
