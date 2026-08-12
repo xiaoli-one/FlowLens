@@ -80,7 +80,7 @@ python3 -m pip install -r requirements.txt
 ```bash
 python3 run.py --default
 ```
-`run.py` 必须指定 `--default` 或 `--scan`。`--default` 会启用全部漏洞检测，包括逻辑漏洞 Agent；默认监听地址为 `127.0.0.1:8081`，流量日志写入 `logs/flows.jsonl`，漏洞报告写入 `report.html`。
+`run.py` 必须指定 `--default` 或 `--scan`。`--default` 会启用全部漏洞检测，sensitive检测量较大，容易网站过慢，可以使用--exclude排除；默认监听地址为 `127.0.0.1:8081`，流量日志写入 `logs/flows.jsonl`，漏洞报告写入 `report.html`。
 
 检测 HTTPS 站点时，需要安装 mitmproxy CA 证书。代理启动后访问 `http://mitm.it`，按系统或浏览器提示安装证书。
 
@@ -96,12 +96,6 @@ python3 run.py --scan sqli,xss,rce
 
 ```bash
 python3 run.py --default --exclude ssrf,upload
-```
-
-启用业务逻辑漏洞 Agent，并同时检测 SQL 注入：
-
-```bash
-python3 run.py --scan logic,sqli
 ```
 
 启用 LLM 主动漏洞验证：
