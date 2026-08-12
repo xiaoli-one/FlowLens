@@ -5,22 +5,11 @@
 # 指纹规则在 pass_scan/fingerprint/rules.yaml + rules.generated.yaml。
 #
 # 启用哪些检测：
-#   python run.py                      默认同时做 SQL 注入 + XSS + 指纹识别 + 命令注入 + 目录遍历 + SSRF + XXE + SSTI + redir + 敏感信息泄漏 + OSS/对象存储桶 + 文件上传 + JWT
-#   python run.py --sqli               只做 SQL 注入
-#   python run.py --xss                只做 XSS
-#   python run.py --rce                只做命令注入
-#   python run.py --lfi                只做目录遍历/任意文件读取
-#   python run.py --ssrf               只做 SSRF
-#   python run.py --xxe                只做 XXE
-#   python run.py --ssti               只做 SSTI
-#   python run.py --redir              只做开放重定向/CRLF 响应头注入
-#   python run.py --sensitive          只做敏感信息泄漏检测
-#   python run.py --oss                只做 OSS/对象存储桶检测
-#   python run.py --upload             只做文件上传漏洞检测
-#   python run.py --jwt                只做 JWT 漏洞检测
-#   python run.py --fp                 只做指纹识别
-#   python run.py --sqli --rce         SQL 注入 + 命令注入
-# 命令行一旦指定检测参数，就只做指定的，覆盖下面的 enabled 开关。
+#   python run.py --default                    启用全部检测（包括逻辑漏洞 Agent）
+#   python run.py --scan sqli,xss,rce          只做 SQL 注入 + XSS + 命令注入
+#   python run.py --default --exclude ssrf     默认检测中排除 SSRF
+#   python run.py --scan logic                 只启用逻辑漏洞 Agent
+# --default 与 --scan 必须二选一。命令行选项会覆盖下面的 enabled 开关。
 
 scan:
   # passive: 只适合以后做纯被动规则
@@ -564,7 +553,7 @@ plugins:
       enabled: false
       poll_interval: 15
 
-  # Agent 逻辑漏洞检测插件。默认关闭，只有运行 python3 run.py --logic 时启用。
+  # Agent 逻辑漏洞检测插件。默认关闭，只有运行 python3 run.py --scan logic 时启用。
   # 插件会把流量结构化索引到 SQLite，并把 Agent 判断结果写入单独的逻辑漏洞标签页。
   logic_agent:
     enabled: false
