@@ -91,9 +91,9 @@ class PassiveScanner:
         """根据配置和命令行选择启用插件。
 
         插件启用优先级：
-        1. 命令行（环境变量 PASS_SCAN_PLUGINS，由 run.py 的 --sqli/--fp 等参数设置）：
+        1. 命令行（环境变量 PASS_SCAN_PLUGINS，由 run.py 的 --default/--scan/--exclude 参数设置）：
            只要设置了这个变量，就**只**启用其中列出的插件，覆盖 config.yaml。
-           不设置（默认运行）则按 config.yaml 的 enabled 开关，两个插件都做。
+           不设置时则按 config.yaml 的 `enabled` 开关加载插件。
         2. config.yaml 的 plugins.<name>.enabled。
         """
         plugin_config = self.config.get("plugins", {})
