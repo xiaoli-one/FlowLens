@@ -20,6 +20,99 @@ FLOWLENS_BANNER = r"""
 """
 
 
+# 命令行名称保持简短，内部始终使用扫描器的插件名称。
+SCAN_PLUGIN_ALIASES = {
+    "sqli": "sql_injection",
+    "sql_injection": "sql_injection",
+    "fp": "fingerprint",
+    "fingerprint": "fingerprint",
+    "xss": "xss",
+    "rce": "command_injection",
+    "command_injection": "command_injection",
+    "lfi": "path_traversal",
+    "path_traversal": "path_traversal",
+    "ssrf": "ssrf",
+    "xxe": "xxe",
+    "ssti": "ssti",
+    "redir": "redir",
+    "sensitive": "sensitive_info",
+    "sensitive_info": "sensitive_info",
+    "oss": "object_storage",
+    "object_storage": "object_storage",
+    "upload": "file_upload",
+    "file_upload": "file_upload",
+    "jwt": "jwt",
+    "logic": "logic_agent",
+    "logic_agent": "logic_agent",
+}
+
+# --default 覆盖全部检测能力，包括逻辑漏洞 Agent。
+DEFAULT_PLUGINS = (
+    "sql_injection",
+    "fingerprint",
+    "xss",
+    "command_injection",
+    "path_traversal",
+    "ssrf",
+    "xxe",
+    "ssti",
+    "redir",
+    "sensitive_info",
+    "object_storage",
+    "file_upload",
+    "jwt",
+    "logic_agent",
+)
+
+
+def split_scan_names(values):
+    """Split comma-separated CLI values while also accepting space-separated names."""
+    names = []
+    for value in values or []:
+        names.extend(
+            name.strip().lower()
+            for name in value.replace("，", ",").split(",")
+            if name.strip()
+        )
+    return names
+
+
+def resolve_plugins(parser, scan_values, exclude_values, use_default):
+    """Resolve CLI scan names into a stable, de-duplicated plugin list."""
+    requested_names = split_scan_names(None if use_default else scan_values)
+    excluded_names = split_scan_names(exclude_values)
+    invalid_names = sorted(
+        {
+            name
+            for name in requested_names + excluded_names
+            if name not in SCAN_PLUGIN_ALIASES
+        }
+    )
+    if invalid_names:
+        parser.error(
+            "未知检测名称: "
+            + ", ".join(invalid_names)
+            + "。可用名称: "
+            + ", ".join(SCAN_PLUGIN_ALIASES)
+        )
+
+    requested_plugins = DEFAULT_PLUGINS if use_default else (
+        SCAN_PLUGIN_ALIASES[name] for name in requested_names
+    )
+    excluded_plugins = {
+        SCAN_PLUGIN_ALIASES[name] for name in excluded_names
+    }
+    selected_plugins = []
+    for plugin in requested_plugins:
+        if plugin not in excluded_plugins and plugin not in selected_plugins:
+            selected_plugins.append(plugin)
+
+    if not selected_plugins:
+        parser.error("--exclude 排除了全部已选检测，至少保留一个检测名称。")
+
+    return selected_plugins
+
+
 def find_mitmdump():
     # 优先使用当前 Python 环境里的 mitmdump。
     # 例如你用 /Users/agiuser/py3/bin/python run.py 启动时，
@@ -57,7 +150,7 @@ def print_banner(args, enabled_label):
     print("", flush=True)
 
 
-def main():
+def build_parser():
     parser = argparse.ArgumentParser(
         prog=APP_NAME.lower(),
         description=f"{APP_NAME} - {APP_TAGLINE}",
@@ -85,95 +178,27 @@ def main():
         action="store_true",
         help="校验目标站 TLS 证书（默认忽略自签名/无效证书，避免自签名目标返回 502）",
     )
-    parser.add_argument(
-        "--sqli",
-        dest="sqli",
+    scan_group = parser.add_mutually_exclusive_group(required=True)
+    scan_group.add_argument(
+        "--default",
         action="store_true",
-        help="只做 SQL 注入检测",
+        help="启用全部漏洞检测，包括逻辑漏洞 Agent",
+    )
+    scan_group.add_argument(
+        "--scan",
+        nargs="+",
+        metavar="VULN",
+        help=(
+            "只启用指定检测，支持逗号或空格分隔；例如: "
+            "--scan sqli,xss,rce 或 --scan sqli xss rce"
+        ),
     )
     parser.add_argument(
-        "--fp",
-        dest="fingerprint",
-        action="store_true",
-        help="只做指纹识别",
-    )
-    parser.add_argument(
-        "--xss",
-        dest="xss",
-        action="store_true",
-        help="只做 XSS 检测",
-    )
-    parser.add_argument(
-        "--rce",
-        dest="rce",
-        action="store_true",
-        help="只做命令注入检测",
-    )
-    parser.add_argument(
-        "--lfi",
-        dest="lfi",
-        action="store_true",
-        help="只做目录遍历/任意文件读取检测",
-    )
-    parser.add_argument(
-        "--ssrf",
-        dest="ssrf",
-        action="store_true",
-        help="只做 SSRF 检测",
-    )
-    parser.add_argument(
-        "--xxe",
-        dest="xxe",
-        action="store_true",
-        help="只做 XXE 检测",
-    )
-    parser.add_argument(
-        "--ssti",
-        dest="ssti",
-        action="store_true",
-        help="只做 SSTI 检测",
-    )
-    parser.add_argument(
-        "--redir",
-        dest="redir",
-        action="store_true",
-        help="只做开放重定向/CRLF 响应头注入检测",
-    )
-    parser.add_argument(
-        "--sensitive",
-        dest="sensitive_info",
-        action="store_true",
-        help="只做敏感信息泄漏检测",
-    )
-    parser.add_argument(
-        "--oss",
-        dest="object_storage",
-        action="store_true",
-        help="只做 OSS/对象存储桶检测",
-    )
-    parser.add_argument(
-        "--upload",
-        dest="file_upload",
-        action="store_true",
-        help="只做文件上传漏洞检测",
-    )
-    parser.add_argument(
-        "--jwt",
-        dest="jwt",
-        action="store_true",
-        help="只做 JWT 漏洞检测",
-    )
-    parser.add_argument(
-        "--logic",
-        dest="logic_agent",
-        action="store_true",
-        help="启用 Agent 逻辑漏洞检测（默认关闭）",
-    )
-    parser.add_argument(
-        "--only-logic",
-        dest="only_logic_agent",
-        action="store_true",
-        help="只启用 Agent 逻辑漏洞检测，不运行其他检测插件",
+        "--exclude",
+        nargs="+",
+        metavar="VULN",
+        default=[],
+        help="排除指定检测，支持逗号或空格分隔；与 --default 或 --scan 一起使用",
     )
     parser.add_argument(
         "--verify",
@@ -181,6 +206,11 @@ def main():
         action="store_true",
         help="启用 Agent 主动漏洞验证与非破坏性利用链生成（默认关闭）",
     )
+    return parser
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
 
     addon_path = os.path.join(os.path.dirname(__file__), "pass_scan", "mitm_addon.py")
@@ -188,56 +218,22 @@ def main():
     if log_dir:
         os.makedirs(log_dir, exist_ok=True)
 
-    # 选择启用哪些检测插件。
-    # 不指定任何检测参数 -> 全做（默认）。
-    # 指定一个或多个 -> 只做指定的。
-    selected_plugins = []
-    if args.sqli:
-        selected_plugins.append("sql_injection")
-    if args.fingerprint:
-        selected_plugins.append("fingerprint")
-    if args.xss:
-        selected_plugins.append("xss")
-    if args.rce:
-        selected_plugins.append("command_injection")
-    if args.lfi:
-        selected_plugins.append("path_traversal")
-    if args.ssrf:
-        selected_plugins.append("ssrf")
-    if args.xxe:
-        selected_plugins.append("xxe")
-    if args.ssti:
-        selected_plugins.append("ssti")
-    if args.redir:
-        selected_plugins.append("redir")
-    if args.sensitive_info:
-        selected_plugins.append("sensitive_info")
-    if args.object_storage:
-        selected_plugins.append("object_storage")
-    if args.file_upload:
-        selected_plugins.append("file_upload")
-    if args.jwt:
-        selected_plugins.append("jwt")
-    if args.only_logic_agent:
-        selected_plugins = ["logic_agent"]
+    selected_plugins = resolve_plugins(
+        parser,
+        args.scan,
+        args.exclude,
+        args.default,
+    )
 
     env = os.environ.copy()
     env["PASS_SCAN_LOG_FILE"] = args.log_file
     env["PASS_SCAN_REPORT_FILE"] = args.report_file
-    if args.logic_agent and not args.only_logic_agent:
-        env["PASS_SCAN_ENABLE_LOGIC"] = "1"
     if args.verify:
         env["PASS_SCAN_VERIFY"] = "1"
     if args.full_payload_scan:
         env["PASS_SCAN_FULL_PAYLOAD_SCAN"] = "1"
-    if selected_plugins:
-        env["PASS_SCAN_PLUGINS"] = ",".join(selected_plugins)
-        label_plugins = list(selected_plugins)
-        if args.logic_agent and not args.only_logic_agent:
-            label_plugins.append("logic_agent")
-        enabled_label = " + ".join(label_plugins)
-    else:
-        enabled_label = "全部 + logic_agent" if args.logic_agent else "全部"
+    env["PASS_SCAN_PLUGINS"] = ",".join(selected_plugins)
+    enabled_label = " + ".join(selected_plugins)
 
     command = [
         find_mitmdump(),
